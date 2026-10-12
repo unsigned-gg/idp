@@ -1,0 +1,46 @@
+# Cargo.toml for idp (Identity Provider & Conclave Bot Manager)
+# Host Throttling: Physical host ceres runs multiple active agent sessions.
+# All cargo invocations (in Makefiles, Justfiles, scripts, and interactive runs)
+# MUST specify -j 2 to prevent memory exhaustion and CPU starvation.
+
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+rust-version = "1.85"
+publish = false
+license = "Apache-2.0 OR MIT OR CC0-1.0"
+authors = ["Christian M. Todie <chris@todie.io>"]
+repository = "https://github.com/unsigned-gg/idp"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive", "env"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+axum = "0.8"
+jsonwebtoken = "10"
+chrono = { version = "0.4", features = ["serde"] }
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+[profile.dev]
+debug = "line-tables-only"

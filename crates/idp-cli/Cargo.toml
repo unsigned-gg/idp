@@ -1,0 +1,30 @@
+[package]
+name = "idp-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+description = "Identity provider CLI for GitHub App manifest minting and bot identity brokering"
+
+[[bin]]
+name = "idp"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+idp = { path = "../idp" }
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+axum.workspace = true

@@ -223,6 +223,11 @@ pub fn stage_onboard(repo: &Path, req: &OnboardRequest) -> Result<Vec<PathBuf>, 
 ///   files (killing group-derived access at T0 per `scripts/lifecycle/offboard.py`).
 /// - When `finalize == true` (T+30d): removes `email` from `directory/licenses.yaml` as well as groups.
 pub fn stage_offboard(repo: &Path, email: &str, finalize: bool) -> Result<Vec<PathBuf>, IdpError> {
+    if email.eq_ignore_ascii_case(idp_domain::reconciler::SOVEREIGN_ROOT_EMAIL) {
+        return Err(IdpError::Validation(format!(
+            "SOVEREIGN ROOT PROTECTED: refusing to offboard {email}"
+        )));
+    }
     let state = load_desired_state(repo)?;
     let target_ou = if state.orgunits.contains("/Suspended-Offboarding") {
         "/Suspended-Offboarding"
@@ -416,5 +421,8 @@ mod tests {
         );
         let lic_after = fs::read_to_string(dir.join("licenses.yaml")).expect("read licenses");
         assert!(!lic_after.contains("nhire@cerebral.work"));
+
+        let err = stage_offboard(root, "ctodie@cerebral.work", false).unwrap_err();
+        assert!(err.to_string().contains("SOVEREIGN ROOT PROTECTED"));
     }
 }

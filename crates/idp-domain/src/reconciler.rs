@@ -28,6 +28,15 @@ use std::sync::LazyLock;
 static PASSWORD_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\bpassword \S+").expect("valid password regex"));
 
+/// Irrevocable Sovereign Root Google Workspace primary email address.
+pub const SOVEREIGN_ROOT_EMAIL: &str = "ctodie@cerebral.work";
+
+/// Irrevocable Sovereign Root GitHub login handle (lowercase).
+pub const SOVEREIGN_ROOT_GITHUB: &str = "todie";
+
+/// Irrevocable Sovereign Root organizational unit path.
+pub const SOVEREIGN_ROOT_ORG_UNIT: &str = "/Humans/Admins";
+
 fn default_true() -> bool {
     true
 }
@@ -390,16 +399,28 @@ pub fn plan_users(
         };
 
         if h.org_unit != w.org_unit {
-            plan.batch.push(format!(
-                "gam update user {email} org {}",
-                shlex_quote(&w.org_unit)
-            ));
+            if email.eq_ignore_ascii_case(SOVEREIGN_ROOT_EMAIL)
+                && w.org_unit != SOVEREIGN_ROOT_ORG_UNIT
+            {
+                plan.manual.push(format!(
+                    "SOVEREIGN ROOT PROTECTED {email} (refusing to move sovereign root out of {SOVEREIGN_ROOT_ORG_UNIT})"
+                ));
+            } else {
+                plan.batch.push(format!(
+                    "gam update user {email} org {}",
+                    shlex_quote(&w.org_unit)
+                ));
+            }
         }
 
         if h.suspended != w.suspended {
             if !w.suspended {
                 plan.manual.push(format!(
                     "NOT REINSTATED {email} (declared suspended: false, live is SUSPENDED — un-suspending is never automated; it is the offboarding-reversal path. Run `gam update user {email} suspended off` deliberately, or correct the row)"
+                ));
+            } else if email.eq_ignore_ascii_case(SOVEREIGN_ROOT_EMAIL) {
+                plan.manual.push(format!(
+                    "SOVEREIGN ROOT PROTECTED {email} (refusing to suspend sovereign root)"
                 ));
             } else if subj == Some(email.as_str()) {
                 plan.manual.push(format!(
@@ -603,6 +624,12 @@ pub fn plan_groups(
                 if held.contains_key(member) {
                     continue;
                 }
+                if member.eq_ignore_ascii_case(SOVEREIGN_ROOT_EMAIL) {
+                    plan.manual.push(format!(
+                        "SOVEREIGN ROOT PROTECTED {member} in {email} (refusing to remove sovereign root from group)"
+                    ));
+                    continue;
+                }
                 plan.batch
                     .push(format!("gam update group {email} remove {member}"));
             }
@@ -654,6 +681,12 @@ pub fn plan_licenses(
             .push(format!("gam user {user} add license {sku}"));
     }
     for (user, sku) in have_set.difference(want) {
+        if user.eq_ignore_ascii_case(SOVEREIGN_ROOT_EMAIL) {
+            plan.manual.push(format!(
+                "SOVEREIGN ROOT PROTECTED {user} (refusing to delete license {sku} from sovereign root)"
+            ));
+            continue;
+        }
         plan.batch
             .push(format!("gam user {user} delete license {sku}"));
     }
@@ -698,7 +731,11 @@ pub fn plan_github(
         };
 
         for login in h.difference(&w) {
-            if self_norm.as_deref() == Some(login.as_str()) {
+            if login.eq_ignore_ascii_case(SOVEREIGN_ROOT_GITHUB) {
+                plan.manual.push(format!(
+                    "SOVEREIGN ROOT PROTECTED {login} in {org}{stake} (refusing to remove sovereign root from GitHub organization)"
+                ));
+            } else if self_norm.as_deref() == Some(login.as_str()) {
                 plan.manual.push(format!(
                     "NOT REMOVED {login} from {org} (this is the account the reconciler authenticates as -- removing it stops the next run from being able to undo the change)"
                 ));
@@ -989,6 +1026,118 @@ mod tests {
             plan.manual
                 .iter()
                 .any(|m| m.starts_with("UNDECLARED stranger in cerebral-work [TAILNET]"))
+        );
+    }
+
+    #[test]
+    fn test_sovereign_root_protection() {
+        let mut want_users = BTreeMap::new();
+        let mut have_users = BTreeMap::new();
+
+        let mut u_root = sample_user("ctodie@cerebral.work");
+        u_root.org_unit = "/Suspended-Offboarding".to_string();
+        u_root.suspended = true;
+        let mut l_root = sample_live_user("ctodie@cerebral.work");
+        l_root.org_unit = "/Humans/Admins".to_string();
+        l_root.suspended = false;
+        want_users.insert(u_root.email.clone(), u_root);
+        have_users.insert(l_root.email.clone(), l_root.clone());
+
+        let user_plan = plan_users(
+            &want_users,
+            &have_users,
+            Some("ahackley@cerebral.work"),
+            "pw",
+        );
+        assert!(user_plan.batch.is_empty());
+        assert_eq!(user_plan.manual.len(), 2);
+        assert!(
+            user_plan
+                .manual
+                .iter()
+                .all(|m| m.starts_with("SOVEREIGN ROOT PROTECTED ctodie@cerebral.work"))
+        );
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 14).unwrap();
+        let mut want_groups = BTreeMap::new();
+        want_groups.insert(
+            "gcp-organization-admins@cerebral.work".to_string(),
+            GroupRecord {
+                email: "gcp-organization-admins@cerebral.work".to_string(),
+                name: "GCP Org Admins".to_string(),
+                description: "Org Admins".to_string(),
+                requires_2sv_enrolled: true,
+                settings: BTreeMap::new(),
+                members: BTreeSet::new(),
+                managers: BTreeSet::new(),
+                owners: BTreeSet::new(),
+                unreconciled_members: vec![],
+            },
+        );
+        let mut have_groups = BTreeMap::new();
+        have_groups.insert(
+            "gcp-organization-admins@cerebral.work".to_string(),
+            LiveGroup {
+                email: "gcp-organization-admins@cerebral.work".to_string(),
+                name: "GCP Org Admins".to_string(),
+                description: "Org Admins".to_string(),
+                settings: BTreeMap::new(),
+                members: BTreeSet::new(),
+                managers: BTreeSet::new(),
+                owners: BTreeSet::from(["ctodie@cerebral.work".to_string()]),
+            },
+        );
+        let group_plan = plan_groups(
+            &want_groups,
+            &have_groups,
+            &want_users,
+            &have_users,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+            today,
+        );
+        assert!(group_plan.batch.is_empty());
+        assert!(
+            group_plan
+                .manual
+                .iter()
+                .any(|m| m.starts_with("SOVEREIGN ROOT PROTECTED ctodie@cerebral.work"))
+        );
+
+        let lic_plan = plan_licenses(
+            &BTreeSet::new(),
+            Some(&BTreeSet::from([(
+                "ctodie@cerebral.work".to_string(),
+                "1010020020".to_string(),
+            )])),
+        );
+        assert!(lic_plan.batch.is_empty());
+        assert!(
+            lic_plan
+                .manual
+                .iter()
+                .any(|m| m.starts_with("SOVEREIGN ROOT PROTECTED ctodie@cerebral.work"))
+        );
+
+        let want_gh = BTreeMap::from([("cerebral-work".to_string(), BTreeSet::new())]);
+        let have_gh = BTreeMap::from([(
+            "cerebral-work".to_string(),
+            BTreeSet::from(["todie".to_string()]),
+        )]);
+        let (gh_plan, _) = plan_github(
+            &want_gh,
+            &have_gh,
+            &BTreeSet::from(["todie".to_string()]),
+            &BTreeSet::from(["todie".to_string()]),
+            Some("lordvoid"),
+        );
+        assert!(gh_plan.batch.is_empty());
+        assert!(gh_plan.gh_batch.is_empty());
+        assert!(
+            gh_plan
+                .manual
+                .iter()
+                .any(|m| m.starts_with("SOVEREIGN ROOT PROTECTED todie in cerebral-work"))
         );
     }
 }

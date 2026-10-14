@@ -14,12 +14,18 @@
 
 pub mod manifest;
 pub mod principal;
+pub mod reconciler;
 pub mod security;
 
 pub use manifest::{AppManifest, ConversionResponse, HookAttributes};
 pub use principal::{
     CapabilityEnvelope, GroupDecision, PROHIBITED_SENSITIVE_PATHS, Principal,
     SOLE_SUPERADMIN_EMAIL, SOLE_SUPERADMIN_GITHUB, SubjectMatterMesh, reconcile_group_decisions,
+};
+pub use reconciler::{
+    GroupRecord, HeldException, LicenseRecord, LiveGroup, LiveUser, OrgUnitRecord, ReconcilePlan,
+    UserRecord, apply_refusal, held_members, plan_admin, plan_digest, plan_github, plan_groups,
+    plan_licenses, plan_orgunits, plan_users, redact, shlex_quote, uncreated,
 };
 pub use security::{
     COMPLIANCE_FAILED, COMPLIANCE_NOT_RUN, COMPLIANCE_OK, constant_time_eq, redact_password,

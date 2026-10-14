@@ -13,6 +13,9 @@ description = "Wave-0 pure zero-I/O identity domain types, 4-tier Principal latt
 workspace = true
 
 [dependencies]
+chrono.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+

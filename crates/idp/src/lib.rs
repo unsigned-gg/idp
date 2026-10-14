@@ -27,7 +27,15 @@ pub mod token;
 pub use idp_domain::manifest;
 pub use idp_domain::principal;
 pub use idp_domain::security;
+pub use reconcile as reconciler;
 
+pub use detectors::{
+    DeclaredAdmission, FORBIDDEN_APPPROJECT_KINDS, Grant, OIDC_PREFIX, Rbac, SubmissionPeer,
+    WIDE_ROLES, admits_port, bound_groups, canonical_peer, describe_peer, evaluate_oidc_bindings,
+    evaluate_reflexd_admission, evaluate_tenant_appprojects, expected_cloudflare_emails,
+    expected_tailscale_admins, load_declared_admission, oidc_grants, resolve_role,
+    submission_peers, wildcard_rules,
+};
 pub use directory::{
     DesiredState, GroupRecord, HeldException, LicenseRecord, OrgUnitRecord, UserRecord, hold_text,
     load_desired_state, matrix_groups, missing_matrix_groups, split_header, unhold_text,
@@ -50,8 +58,9 @@ pub use principal::{
     SOLE_SUPERADMIN_EMAIL, SOLE_SUPERADMIN_GITHUB, SubjectMatterMesh, reconcile_group_decisions,
 };
 pub use reconcile::{
-    LiveGroup, LiveUser, ReconcilePlan, apply_refusal, held_members, plan_admin, plan_digest,
-    plan_findings, plan_github, plan_groups, plan_licenses, plan_orgunits, plan_users, redact,
+    LiveDirectoryState, LiveGroup, LiveUser, ReconcilePlan, apply_refusal, held_members,
+    plan_admin, plan_digest, plan_findings, plan_github, plan_groups, plan_licenses, plan_orgunits,
+    plan_users, reconcile_directory, redact, shlex_quote, uncreated,
 };
 pub use registry::{
     ALL_ESTATE_ELVES, CONCLAVE_ELVES, ElfPersona, KeyStore, find_elf, is_automation_login,

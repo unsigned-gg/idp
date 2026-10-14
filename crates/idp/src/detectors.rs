@@ -964,6 +964,120 @@ fn expand_active_group_members(
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// tenant_appprojects detector
+// ---------------------------------------------------------------------------
+
+/// Forbidden cluster-scoped kinds in a tenant ArgoCD `AppProject`'s `spec.clusterResourceWhitelist`.
+pub const FORBIDDEN_APPPROJECT_KINDS: &[&str] = &["ClusterRole", "ClusterRoleBinding", "*"];
+
+/// Evaluates an ArgoCD `AppProjectList` JSON object for tenant projects (`metadata.name` starting with
+/// `tenant_prefix`) that permit `ClusterRole`, `ClusterRoleBinding`, or `*` in `spec.clusterResourceWhitelist`.
+///
+/// Fails closed (`Err(IdpError::Validation(...))`) if `items` is missing or zero matching tenant projects are found.
+pub fn evaluate_tenant_appprojects(
+    listing: &Value,
+    namespace: &str,
+    tenant_prefix: &str,
+) -> Result<(i32, Vec<String>, Findings), IdpError> {
+    let path = format!("/apis/argoproj.io/v1alpha1/namespaces/{namespace}/appprojects");
+    let items = listing
+        .get("items")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| IdpError::Validation(format!("{path}: response missing items list")))?;
+
+    let tenant_projects: Vec<&Value> = items
+        .iter()
+        .filter(|item| {
+            item.get("metadata")
+                .and_then(|m| m.get("name"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|n| n.starts_with(tenant_prefix))
+        })
+        .collect();
+
+    if tenant_projects.is_empty() {
+        return Err(IdpError::Validation(format!(
+            "{path}: 0 AppProjects matching prefix '{tenant_prefix}' (out of {} total) — refusing to report clean on empty tenant set",
+            items.len()
+        )));
+    }
+
+    let mut f = Findings::new("tenant-appprojects");
+    let mut lines = Vec::new();
+
+    for proj in tenant_projects {
+        let name = proj
+            .get("metadata")
+            .and_then(|m| m.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("<unnamed>");
+        let subject = format!("AppProject/{namespace}/{name}");
+        let spec = proj.get("spec").unwrap_or(&Value::Null);
+
+        let wl_val = spec.get("clusterResourceWhitelist");
+        if let Some(v) = wl_val
+            && !v.is_null()
+            && !v.is_array()
+        {
+            f.add(
+                "cluster-rbac-whitelisted",
+                name,
+                "high",
+                format!("{subject} has malformed clusterResourceWhitelist"),
+                vec!["spec.clusterResourceWhitelist is not a list".to_string()],
+                Some(
+                    "Set spec.clusterResourceWhitelist to a list without ClusterRole, ClusterRoleBinding, or *."
+                        .to_string(),
+                ),
+            );
+            continue;
+        }
+
+        let mut forbidden = BTreeSet::new();
+        if let Some(arr) = wl_val.and_then(|v| v.as_array()) {
+            for entry in arr {
+                let Some(obj) = entry.as_object() else {
+                    continue;
+                };
+                let group = obj.get("group").and_then(|v| v.as_str()).unwrap_or("");
+                let kind = obj.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                if FORBIDDEN_APPPROJECT_KINDS.contains(&kind) || group == "*" {
+                    forbidden.insert(format!("{group}/{kind}"));
+                }
+            }
+        }
+
+        if !forbidden.is_empty() {
+            let joined: Vec<String> = forbidden.into_iter().collect();
+            let joined_str = joined.join(", ");
+            let title = format!("{subject} whitelists cluster-scoped RBAC/wildcard ({joined_str})");
+            let detail = format!(
+                "{subject} spec.clusterResourceWhitelist permits forbidden cluster-scoped RBAC/wildcard resource(s): {joined_str}"
+            );
+            lines.push(format!("[HIGH] {title}: {detail}"));
+            f.add(
+                "cluster-rbac-whitelisted",
+                name,
+                "high",
+                title,
+                vec![detail],
+                Some(format!(
+                    "Remove {joined_str} from spec.clusterResourceWhitelist on {subject} and re-render tenant AppProjects (OPS-1545)."
+                )),
+            );
+        }
+    }
+
+    f.evaluated("cluster-rbac-whitelisted");
+    if f.items.is_empty() {
+        lines.push("OK: all tenant AppProjects free of cluster-RBAC whitelist entries".to_string());
+        Ok((0, lines, f))
+    } else {
+        Ok((2, lines, f))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1020,5 +1134,33 @@ mod tests {
         let (rc, _lines, f) = evaluate_reflexd_admission(&decl, &pols, &[]);
         assert_eq!(rc, 0);
         assert!(f.items.is_empty());
+    }
+
+    #[test]
+    fn test_tenant_appprojects_detector() {
+        let clean = json!({
+            "items": [{
+                "metadata": {"name": "tenant-alpha"},
+                "spec": {"clusterResourceWhitelist": [{"group": "", "kind": "Namespace"}]}
+            }]
+        });
+        let (rc, lines, f) = evaluate_tenant_appprojects(&clean, "argocd", "tenant-").unwrap();
+        assert_eq!(rc, 0);
+        assert!(f.items.is_empty());
+        assert!(lines[0].contains("OK:"));
+
+        let dirty = json!({
+            "items": [{
+                "metadata": {"name": "tenant-alpha"},
+                "spec": {"clusterResourceWhitelist": [{"group": "rbac.authorization.k8s.io", "kind": "ClusterRoleBinding"}]}
+            }]
+        });
+        let (rc2, _lines2, f2) = evaluate_tenant_appprojects(&dirty, "argocd", "tenant-").unwrap();
+        assert_eq!(rc2, 2);
+        assert_eq!(f2.items.len(), 1);
+        assert_eq!(f2.items[0].severity, "high");
+
+        let empty = json!({"items": [{"metadata": {"name": "default"}}]});
+        assert!(evaluate_tenant_appprojects(&empty, "argocd", "tenant-").is_err());
     }
 }

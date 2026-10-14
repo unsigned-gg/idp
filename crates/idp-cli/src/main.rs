@@ -6,10 +6,11 @@
 mod server;
 
 use anyhow::{Context, Result, bail};
+use chrono::{NaiveDate, Utc};
 use clap::{Args, Parser, Subcommand};
 use idp::detectors::{
-    Rbac, evaluate_oidc_bindings, evaluate_reflexd_admission, expected_cloudflare_emails,
-    expected_tailscale_admins, load_declared_admission,
+    Rbac, evaluate_oidc_bindings, evaluate_reflexd_admission, evaluate_tenant_appprojects,
+    expected_cloudflare_emails, expected_tailscale_admins, load_declared_admission,
 };
 use idp::directory::{
     hold_text, load_desired_state, unhold_text, validate_directory_schema, validate_identity_models,
@@ -20,7 +21,9 @@ use idp::planes::{
     LiveGroupMember, all_declared, foundation_declared, gam_declared, undeclared_groups_report,
     unmanaged_declared,
 };
-use idp::reconcile::{apply_refusal, plan_digest};
+use idp::reconcile::{
+    LiveDirectoryState, apply_refusal, plan_digest, plan_findings, reconcile_directory, redact,
+};
 use idp::registry::{ALL_ESTATE_ELVES, CONCLAVE_ELVES, KeyStore};
 use idp::token::TokenBroker;
 use server::{AppState, create_router};
@@ -157,6 +160,22 @@ struct ReconcileArgs {
 
 #[derive(Subcommand)]
 enum ReconcileCommands {
+    /// Compute a reconciliation plan over `directory/` and a live directory snapshot JSON
+    Plan {
+        /// Path to the identity repository root
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Path to a `LiveDirectoryState` JSON snapshot
+        #[arg(long)]
+        live_json: PathBuf,
+        /// Optional `YYYY-MM-DD` evaluation date (defaults to UTC today)
+        #[arg(long)]
+        today: Option<String>,
+        /// Initial password placeholder for newly created users
+        #[arg(long, default_value = "<generated>")]
+        initial_password: String,
+    },
+
     /// Add or update an `unreconciled_members` hold exception on a group YAML file
     Hold {
         /// Path to the identity repository root
@@ -287,6 +306,19 @@ enum DetectorCommands {
         /// Path to JSON list of Namespace objects
         #[arg(long)]
         namespaces_json: PathBuf,
+    },
+
+    /// Evaluate tenant ArgoCD AppProjects for forbidden cluster-RBAC whitelist entries
+    TenantAppprojects {
+        /// Path to JSON `AppProjectList` object
+        #[arg(long)]
+        appprojects_json: PathBuf,
+        /// ArgoCD namespace
+        #[arg(long, default_value = "argocd")]
+        namespace: String,
+        /// Tenant AppProject name prefix
+        #[arg(long, default_value = "tenant-")]
+        prefix: String,
     },
 
     /// Print expected active Cloudflare and Tailscale admin emails from `role-matrix.yaml`
@@ -431,6 +463,59 @@ async fn main() -> Result<()> {
             other => bail!("unknown plane '{other}' (expected all, gam, foundation, or unmanaged)"),
         },
         Commands::Reconcile(args) => match args.command {
+            ReconcileCommands::Plan {
+                repo,
+                live_json,
+                today,
+                initial_password,
+            } => {
+                let desired = load_desired_state(&repo)?;
+                let raw = std::fs::read_to_string(&live_json)?;
+                let live: LiveDirectoryState = serde_json::from_str(&raw)?;
+                let elsewhere = foundation_declared(&repo)?;
+                let unmanaged_path = repo.join("directory/groups-unmanaged.yaml");
+                let unmanaged = if unmanaged_path.exists() {
+                    unmanaged_declared(&unmanaged_path)?
+                } else {
+                    BTreeMap::new()
+                };
+                let eval_date = match today {
+                    Some(s) => NaiveDate::parse_from_str(&s, "%Y-%m-%d")
+                        .with_context(|| format!("invalid --today date '{s}'"))?,
+                    None => Utc::now().date_naive(),
+                };
+                let (plan, stakes) = reconcile_directory(
+                    &desired,
+                    &live,
+                    &elsewhere,
+                    &unmanaged,
+                    eval_date,
+                    &initial_password,
+                );
+                let digest = plan_digest(&plan.serial, &plan.batch);
+                let total = plan.serial.len() + plan.batch.len();
+                println!(
+                    "== PLAN: {total} command(s) ({} prerequisite, {} batch) ==",
+                    plan.serial.len(),
+                    plan.batch.len()
+                );
+                println!("== Plan SHA256: {digest} ==");
+                for c in plan.serial.iter().chain(plan.batch.iter()) {
+                    let tag = stakes
+                        .get(c)
+                        .map(|s| format!("  # [{s}]"))
+                        .unwrap_or_default();
+                    println!("  {}{tag}", redact(c));
+                }
+                if !plan.manual.is_empty() {
+                    println!("\n== MANUAL REVIEW ({}) ==", plan.manual.len());
+                    for m in &plan.manual {
+                        println!("  ! {m}");
+                    }
+                }
+                let f = plan_findings(&plan.serial, &plan.batch, &plan.manual, &digest, &stakes);
+                f.write_to_env()?;
+            }
             ReconcileCommands::Hold {
                 repo,
                 group,
@@ -464,8 +549,6 @@ async fn main() -> Result<()> {
                 println!("removed hold for {email} in {}", path.display());
             }
             ReconcileCommands::VerifyDigest { expected, actual } => {
-                let d = plan_digest(&[], &[]);
-                let _ = d;
                 if let Some(msg) = apply_refusal(expected.as_deref(), &actual) {
                     eprintln!("{msg}");
                     std::process::exit(2);
@@ -611,6 +694,27 @@ async fn main() -> Result<()> {
                 }
                 f.write_to_env()?;
                 std::process::exit(rc);
+            }
+            DetectorCommands::TenantAppprojects {
+                appprojects_json,
+                namespace,
+                prefix,
+            } => {
+                let listing: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(&appprojects_json)?)?;
+                match evaluate_tenant_appprojects(&listing, &namespace, &prefix) {
+                    Ok((rc, lines, f)) => {
+                        for line in lines {
+                            println!("{line}");
+                        }
+                        f.write_to_env()?;
+                        std::process::exit(rc);
+                    }
+                    Err(e) => {
+                        eprintln!("ERROR: {e}");
+                        std::process::exit(1);
+                    }
+                }
             }
             DetectorCommands::RoleMatrixExpected { repo } => {
                 let cf = expected_cloudflare_emails(&repo)?;

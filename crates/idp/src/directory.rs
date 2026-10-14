@@ -12,7 +12,6 @@ use crate::principal::{SOLE_SUPERADMIN_EMAIL, SOLE_SUPERADMIN_GITHUB};
 use crate::registry::is_automation_login;
 use chrono::NaiveDate;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
@@ -22,111 +21,9 @@ use std::sync::LazyLock;
 static GROUP_EMAIL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[a-z0-9-]+@cerebral\.work$").expect("valid group email regex"));
 
-/// User record declared in `directory/users.yaml`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UserRecord {
-    /// Primary Google Workspace email address.
-    pub email: String,
-    /// Given (first) name.
-    pub given_name: String,
-    /// Family (last) name.
-    pub family_name: String,
-    /// Google Workspace organizational unit path (e.g. `"/Engineering"`).
-    pub org_unit: String,
-    /// Whether the user account is suspended.
-    #[serde(default)]
-    pub suspended: bool,
-    /// Whether the reconciler may create the account in Google Workspace (defaults to `true`).
-    #[serde(default = "default_true")]
-    pub create: bool,
-    /// Whether the user holds Google Workspace Super Admin privileges.
-    #[serde(default)]
-    pub is_super_admin: bool,
-    /// Optional admin level string (`"super"` or `"delegated"`).
-    #[serde(default)]
-    pub admin: Option<String>,
-    /// Delegated Google Workspace admin roles held by the user.
-    #[serde(default)]
-    pub admin_roles: BTreeSet<String>,
-    /// Email aliases assigned to the user.
-    #[serde(default)]
-    pub aliases: BTreeSet<String>,
-    /// Optional GitHub login handle (case-insensitive for matching).
-    #[serde(default)]
-    pub github_handle: Option<String>,
-    /// GitHub organizations the user should belong to.
-    #[serde(default)]
-    pub github_orgs: BTreeSet<String>,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-/// Organizational unit declared in `directory/orgunits.yaml`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OrgUnitRecord {
-    /// Organizational unit path (e.g. `"/Engineering"`).
-    pub path: String,
-    /// Human-readable description.
-    #[serde(default)]
-    pub description: String,
-}
-
-/// Manual hold exception in `unreconciled_members` of a group file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HeldException {
-    /// Member email address held from removal.
-    pub email: String,
-    /// Human explanation for the exception.
-    #[serde(default)]
-    pub reason: String,
-    /// Optional `YYYY-MM-DD` expiration date.
-    #[serde(default)]
-    pub until: Option<String>,
-}
-
-/// Group record declared in `directory/groups/*.yaml`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GroupRecord {
-    /// Group email address (`<slug>@cerebral.work`).
-    pub email: String,
-    /// Display name of the group.
-    pub name: String,
-    /// Group description.
-    #[serde(default)]
-    pub description: String,
-    /// Group settings map.
-    #[serde(default)]
-    pub settings: BTreeMap<String, String>,
-    /// Regular members (`MEMBER`).
-    #[serde(default)]
-    pub members: BTreeSet<String>,
-    /// Group managers (`MANAGER`).
-    #[serde(default)]
-    pub managers: BTreeSet<String>,
-    /// Group owners (`OWNER`).
-    #[serde(default)]
-    pub owners: BTreeSet<String>,
-    /// Manual hold exceptions (`unreconciled_members`).
-    #[serde(default)]
-    pub unreconciled_members: Vec<HeldException>,
-}
-
-/// License assignment block declared in `directory/licenses.yaml`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LicenseRecord {
-    /// Google Workspace SKU ID.
-    pub sku_id: String,
-    /// Human-readable SKU name.
-    pub sku_name: String,
-    /// Whether the reconciler manages this SKU (`false` skips automated assignment/revocation).
-    #[serde(default)]
-    pub reconcile: bool,
-    /// Users assigned this license SKU.
-    #[serde(default)]
-    pub users: BTreeSet<String>,
-}
+pub use idp_domain::reconciler::{
+    GroupRecord, HeldException, LicenseRecord, OrgUnitRecord, UserRecord,
+};
 
 /// Complete desired directory state loaded from `directory/`.
 #[derive(Debug, Clone)]
@@ -143,7 +40,7 @@ pub struct DesiredState {
     pub admin_roles: BTreeMap<String, BTreeSet<String>>,
     /// Managed GitHub organizations mapping `org -> {lowercase_handle}` of active members.
     pub github_orgs: BTreeMap<String, BTreeSet<String>>,
-    /// Lowercase GitHub handles of users who are `suspended: true` or in `/Offboarding`.
+    /// Lowercase GitHub handles of users who are `suspended: true` or in `/Offboarding` / `/Suspended-Offboarding`.
     pub leaving_github: BTreeSet<String>,
     /// Lowercase GitHub handles of all active users in `directory/users.yaml`.
     pub declared_github: BTreeSet<String>,
@@ -182,7 +79,10 @@ pub fn load_desired_state(repo: &Path) -> Result<DesiredState, IdpError> {
             admin_roles.insert(rec.email.clone(), rec.admin_roles.clone());
             if let Some(ref gh) = rec.github_handle {
                 let lower = gh.to_lowercase();
-                if rec.suspended || rec.org_unit == "/Offboarding" {
+                if rec.suspended
+                    || rec.org_unit == "/Offboarding"
+                    || rec.org_unit == "/Suspended-Offboarding"
+                {
                     leaving_github.insert(lower);
                 } else {
                     declared_github.insert(lower.clone());
@@ -322,6 +222,11 @@ pub fn load_desired_state(repo: &Path) -> Result<DesiredState, IdpError> {
                 }
             }
 
+            let requires_2sv_enrolled = g_val
+                .get("requires_2sv_enrolled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
             groups.insert(
                 email.clone(),
                 GroupRecord {
@@ -333,6 +238,7 @@ pub fn load_desired_state(repo: &Path) -> Result<DesiredState, IdpError> {
                     managers,
                     owners,
                     unreconciled_members,
+                    requires_2sv_enrolled,
                 },
             );
         }
@@ -558,11 +464,13 @@ pub fn validate_directory_schema(repo: &Path) -> Result<usize, IdpError> {
         }
     }
 
-    let missing_groups = missing_matrix_groups(repo)?;
-    if !missing_groups.is_empty() {
-        return Err(IdpError::Validation(format!(
-            "role-matrix.yaml references groups not declared in GAM or foundation: {missing_groups:?}"
-        )));
+    if dir.join("role-matrix.yaml").exists() {
+        let missing_groups = missing_matrix_groups(repo)?;
+        if !missing_groups.is_empty() {
+            return Err(IdpError::Validation(format!(
+                "role-matrix.yaml references groups not declared in GAM or foundation: {missing_groups:?}"
+            )));
+        }
     }
 
     Ok(state.users.len())

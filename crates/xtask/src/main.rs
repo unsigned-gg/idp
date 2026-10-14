@@ -3,6 +3,7 @@
 #![allow(missing_docs)]
 
 mod branch_hygiene;
+mod gates;
 mod graph_audit;
 mod pipeline;
 mod spec_check;
@@ -74,6 +75,34 @@ enum Commands {
         #[arg(long)]
         apply: bool,
     },
+    /// Install the pinned gate tools that are missing or at another version (SPEC-0003)
+    Tools,
+    /// `cargo fmt --all`
+    Fmt,
+    /// `cargo fmt --all -- --check`
+    FmtCheck,
+    /// `cargo clippy --workspace --all-targets`, warnings are errors
+    Clippy,
+    /// nextest, or `cargo test` when nextest is missing
+    Test,
+    /// `cargo test --doc --workspace`
+    DocTest,
+    /// `cargo deny check`
+    Deny,
+    /// `typos`
+    Typos,
+    /// `cargo machete`
+    Machete,
+    /// tools, toolchain-check, fmt-check, clippy, test, doc-test, deny, typos, machete
+    Ci,
+    /// `ci`, then release builds of every binary
+    Install,
+}
+
+/// The SPEC-0003 gate a command runs through `gates::run`, if it is one.
+fn gate_of(command: &Commands) -> Option<gates::Gate> {
+    let _ = command;
+    None
 }
 
 #[derive(Subcommand)]
@@ -161,6 +190,12 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let root = workspace_root();
 
+    if let Some(gate) = gate_of(&cli.command) {
+        if gate != gates::Gate::ToolchainCheck {
+            return gates::run(&root, gate);
+        }
+    }
+
     let res = match cli.command {
         Commands::Xwork => run_xwork(&root),
         Commands::Xtool { tool } => match tool {
@@ -202,6 +237,17 @@ fn main() -> ExitCode {
         Commands::BranchHygiene { dry_run: _, apply } => {
             branch_hygiene::run_branch_hygiene(&root, apply)
         }
+        Commands::Tools
+        | Commands::Fmt
+        | Commands::FmtCheck
+        | Commands::Clippy
+        | Commands::Test
+        | Commands::DocTest
+        | Commands::Deny
+        | Commands::Typos
+        | Commands::Machete
+        | Commands::Ci
+        | Commands::Install => Err("a SPEC-0003 gate reached the legacy dispatch".to_string()),
     };
 
     match res {
@@ -312,4 +358,58 @@ fn check_stages(root: &Path) -> Result<(), String> {
         stages::XWORK_STAGES.len()
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Option<Commands> {
+        let mut argv = vec!["xtask"];
+        argv.extend_from_slice(args);
+        Cli::try_parse_from(argv).ok().map(|cli| cli.command)
+    }
+
+    #[test]
+    fn xt1_every_gate_parses_on_the_command_line() {
+        for gate in gates::Gate::ALL {
+            let command = parse(&[gate.name()]);
+            assert!(command.is_some(), "`{}` does not parse", gate.name());
+            assert_eq!(
+                command.as_ref().and_then(gate_of),
+                Some(gate),
+                "{}",
+                gate.name()
+            );
+        }
+    }
+
+    #[test]
+    fn xt1_existing_commands_parse_and_are_not_gates() {
+        let existing: [&[&str]; 11] = [
+            &["xwork"],
+            &["check", "--resume", "--enforce-dbr", "--break-check"],
+            &["graph-audit", "--break-check"],
+            &["zero-io-domain"],
+            &["projectfile-check"],
+            &["stages-check"],
+            &["stages-gen"],
+            &["spec-check"],
+            &["branch-hygiene", "--dry-run"],
+            &["xtool", "check", "--enforce-dbr"],
+            &["xtool", "toolchain-check"],
+        ];
+        for args in existing {
+            let command = parse(args);
+            assert!(command.is_some(), "{args:?} does not parse");
+            assert_eq!(command.as_ref().and_then(gate_of), None, "{args:?}");
+        }
+    }
+
+    #[test]
+    fn xt1_unknown_commands_and_flags_are_refused() {
+        assert!(parse(&["nope"]).is_none());
+        assert!(parse(&["ci", "--resume"]).is_none());
+        assert!(parse(&[]).is_none());
+    }
 }

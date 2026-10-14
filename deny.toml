@@ -25,6 +25,11 @@ ignore = true
 
 [advisories]
 yanked = "deny"
+ignore = [
+  # unsafe-libyaml (via serde_yaml) is unmaintained, not vulnerable. unsigned-gg/ls ignores the
+  # same advisory (ff916bd). Drop this when serde_yaml is replaced.
+  "RUSTSEC-2024-0449",
+]
 
 [bans]
 multiple-versions = "warn"

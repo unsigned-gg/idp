@@ -30,4 +30,4 @@ jobs:
         run: cargo xtask check --break-check --enforce-dbr
 
       - name: Smoke check CLI
-        run: cargo run --package idp-cli -j 2 -- list
+        run: cargo run --package idp-cli -j 2 -- bot list

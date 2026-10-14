@@ -19,6 +19,11 @@ allow = [
   "CC0-1.0",
 ]
 confidence-threshold = 0.8
+exceptions = [
+  # webpki-roots (via reqwest's rustls) ships the Mozilla root store under CDLA-Permissive-2.0,
+  # a permissive data licence. Allowed for this crate only; cerebral-work/lattice allows it too.
+  { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
+]
 
 [licenses.private]
 ignore = true

@@ -1,16 +1,30 @@
 // Copyright 2026 Christian M. Todie <chris@todie.io>
 // SPDX-License-Identifier: Apache-2.0 OR MIT OR CC0-1.0
 
-//! Identity Provider CLI (`idp`) for unsigned-gg and Clockwork Conclave bots.
+//! Identity Provider CLI (`idp`) for `unsigned-gg`, `cerebral-work/identity`, and Clockwork Conclave bots.
 
 mod server;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
+use idp::detectors::{
+    Rbac, evaluate_oidc_bindings, evaluate_reflexd_admission, expected_cloudflare_emails,
+    expected_tailscale_admins, load_declared_admission,
+};
+use idp::directory::{
+    hold_text, load_desired_state, unhold_text, validate_directory_schema, validate_identity_models,
+};
+use idp::lifecycle::{OnboardRequest, stage_offboard, stage_onboard};
 use idp::manifest::AppManifest;
-use idp::registry::{CONCLAVE_ELVES, KeyStore};
+use idp::planes::{
+    LiveGroupMember, all_declared, foundation_declared, gam_declared, undeclared_groups_report,
+    unmanaged_declared,
+};
+use idp::reconcile::{apply_refusal, plan_digest};
+use idp::registry::{ALL_ESTATE_ELVES, CONCLAVE_ELVES, KeyStore};
 use idp::token::TokenBroker;
 use server::{AppState, create_router};
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,7 +32,7 @@ use tracing::info;
 
 #[derive(Parser)]
 #[command(name = "idp")]
-#[command(about = "Identity Provider CLI and Conclave Bot Manager for unsigned-gg")]
+#[command(about = "Identity Provider CLI, Directory Reconciler, and Conclave Bot Manager")]
 #[command(version)]
 struct Cli {
     #[command(subcommand)]
@@ -35,6 +49,33 @@ enum Commands {
 
     /// List Conclave bot identities and host registration status
     Bot(BotArgs),
+
+    /// Validate declarative identity directory (`users.yaml`, `groups/*.yaml`, `role-matrix.yaml`, `policies.yaml`)
+    Validate {
+        /// Path to the identity repository root
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
+
+    /// Inspect declared group planes (`gam`, `foundation`, `unmanaged`, `all`)
+    Planes {
+        /// Path to the identity repository root
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+
+        /// Plane to print (`all`, `gam`, `foundation`, `unmanaged`)
+        #[arg(long, default_value = "all")]
+        plane: String,
+    },
+
+    /// Reconciliation plan digest and hold/unhold operations
+    Reconcile(ReconcileArgs),
+
+    /// User onboarding and two-stage offboarding lifecycle operations
+    Lifecycle(LifecycleArgs),
+
+    /// Run clause-tested identity detectors over JSON snapshots or repository state
+    Detectors(DetectorArgs),
 }
 
 #[derive(Args)]
@@ -100,8 +141,160 @@ struct BotArgs {
 
 #[derive(Subcommand)]
 enum BotCommands {
-    /// List all 16 canonical Clockwork Conclave bots and key statuses
-    List,
+    /// List Clockwork Conclave bots and key statuses
+    List {
+        /// Include all 22 extended estate elves (default: 16 core Conclave elves)
+        #[arg(long)]
+        all: bool,
+    },
+}
+
+#[derive(Args)]
+struct ReconcileArgs {
+    #[command(subcommand)]
+    command: ReconcileCommands,
+}
+
+#[derive(Subcommand)]
+enum ReconcileCommands {
+    /// Add or update an `unreconciled_members` hold exception on a group YAML file
+    Hold {
+        /// Path to the identity repository root
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Group slug or email
+        group: String,
+        /// Member email address to hold
+        email: String,
+        /// Human explanation for the exception
+        #[arg(long)]
+        reason: String,
+        /// Optional `YYYY-MM-DD` expiration date
+        #[arg(long)]
+        until: Option<String>,
+    },
+
+    /// Remove an `unreconciled_members` hold exception from a group YAML file
+    Unhold {
+        /// Path to the identity repository root
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Group slug or email
+        group: String,
+        /// Member email address to unhold
+        email: String,
+    },
+
+    /// Verify an expected plan SHA-256 digest against a current digest
+    VerifyDigest {
+        /// Expected digest passed via `--expect-plan-sha256`
+        #[arg(long)]
+        expected: Option<String>,
+        /// Actual computed 16-char digest
+        #[arg(long)]
+        actual: String,
+    },
+}
+
+#[derive(Args)]
+struct LifecycleArgs {
+    #[command(subcommand)]
+    command: LifecycleCommands,
+}
+
+#[derive(Subcommand)]
+enum LifecycleCommands {
+    /// Stage a new user in `directory/`
+    Onboard {
+        /// Path to the identity repository root
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// User email (`<handle>@cerebral.work`)
+        email: String,
+        /// Given (first) name
+        given_name: String,
+        /// Family (last) name
+        family_name: String,
+        /// Google Workspace organizational unit path
+        #[arg(long, default_value = "/Engineering")]
+        org_unit: String,
+        /// Comma-separated group slugs or emails
+        #[arg(long, default_value = "")]
+        groups: String,
+        /// Google Workspace license SKU ID
+        #[arg(long, default_value = "1010020020")]
+        sku_id: String,
+        /// Skip license assignment
+        #[arg(long)]
+        no_license: bool,
+        /// Optional GitHub login handle
+        #[arg(long)]
+        github: Option<String>,
+        /// Comma-separated GitHub orgs (defaults to `managed_github_orgs` when `--github` is set)
+        #[arg(long)]
+        github_orgs: Option<String>,
+        /// Set `create: false` on the user record
+        #[arg(long)]
+        no_create: bool,
+    },
+
+    /// Stage user offboarding (`T0` suspension or `--finalize` group removal)
+    Offboard {
+        /// Path to the identity repository root
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// User email (`<handle>@cerebral.work`)
+        email: String,
+        /// Finalize (`T+30d`): remove user from all group files
+        #[arg(long)]
+        finalize: bool,
+    },
+}
+
+#[derive(Args)]
+struct DetectorArgs {
+    #[command(subcommand)]
+    command: DetectorCommands,
+}
+
+#[derive(Subcommand)]
+enum DetectorCommands {
+    /// Evaluate undeclared Google Workspace groups from a live groups JSON file
+    UndeclaredGroups {
+        /// Path to the identity repository root
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// Path to JSON file mapping `{group_email: [{"email": "...", "role": "..."}]}`
+        #[arg(long)]
+        live_json: PathBuf,
+    },
+
+    /// Evaluate Kubernetes OIDC RBAC bindings from a JSON snapshot
+    OidcBindings {
+        /// Path to JSON file with `cluster_roles`, `roles`, `cluster_role_bindings`, `role_bindings`
+        #[arg(long)]
+        rbac_json: PathBuf,
+    },
+
+    /// Evaluate `reflexd` NetworkPolicy ingress admission from JSON snapshots
+    ReflexdAdmission {
+        /// Path to `reflexd-admission.yaml`
+        #[arg(long, default_value = "directory/reflexd-admission.yaml")]
+        declared: PathBuf,
+        /// Path to JSON list of NetworkPolicy objects
+        #[arg(long)]
+        policies_json: PathBuf,
+        /// Path to JSON list of Namespace objects
+        #[arg(long)]
+        namespaces_json: PathBuf,
+    },
+
+    /// Print expected active Cloudflare and Tailscale admin emails from `role-matrix.yaml`
+    RoleMatrixExpected {
+        /// Path to the identity repository root
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -166,17 +359,22 @@ async fn main() -> Result<()> {
             }
         },
         Commands::Bot(args) => match args.command {
-            BotCommands::List => {
+            BotCommands::List { all } => {
+                let elves = if all {
+                    ALL_ESTATE_ELVES
+                } else {
+                    CONCLAVE_ELVES
+                };
                 println!(
-                    "{:<4} | {:<10} | {:<12} | {:<10} | {:<30}",
+                    "{:<4} | {:<10} | {:<14} | {:<10} | {:<30}",
                     "NUM", "BOT", "REPO", "STATUS", "KEY FILE"
                 );
                 println!(
-                    "{:-<4}-+-{:-<10}-+-{:-<12}-+-{:-<10}-+-{:-<30}",
+                    "{:-<4}-+-{:-<10}-+-{:-<14}-+-{:-<10}-+-{:-<30}",
                     "", "", "", "", ""
                 );
 
-                for (idx, elf) in CONCLAVE_ELVES.iter().enumerate() {
+                for (idx, elf) in elves.iter().enumerate() {
                     let has_key = key_store.has_key(elf.id);
                     let status = if has_key { "MINTED" } else { "PENDING" };
                     let key_path = if has_key {
@@ -186,7 +384,7 @@ async fn main() -> Result<()> {
                     };
 
                     println!(
-                        "{:<4} | {:<10} | {:<12} | {:<10} | {:<30}",
+                        "{:<4} | {:<10} | {:<14} | {:<10} | {:<30}",
                         idx + 1,
                         elf.name,
                         elf.repo,
@@ -194,6 +392,234 @@ async fn main() -> Result<()> {
                         key_path
                     );
                 }
+            }
+        },
+        Commands::Validate { repo } => {
+            let user_count = validate_directory_schema(&repo)?;
+            validate_identity_models(&repo)?;
+            let reflexd_path = repo.join("directory/reflexd-admission.yaml");
+            if reflexd_path.exists() {
+                load_declared_admission(&reflexd_path)?;
+            }
+            let declared_groups = all_declared(&repo)?;
+            println!(
+                "Desired state valid: {user_count} users, {} declared groups across GAM + foundation",
+                declared_groups.len()
+            );
+        }
+        Commands::Planes { repo, plane } => match plane.as_str() {
+            "gam" => {
+                for g in gam_declared(&repo)? {
+                    println!("{g}");
+                }
+            }
+            "foundation" => {
+                for g in foundation_declared(&repo)? {
+                    println!("{g}");
+                }
+            }
+            "unmanaged" => {
+                for (g, why) in unmanaged_declared(&repo.join("directory/groups-unmanaged.yaml"))? {
+                    println!("{g}\t{why}");
+                }
+            }
+            "all" => {
+                for g in all_declared(&repo)? {
+                    println!("{g}");
+                }
+            }
+            other => bail!("unknown plane '{other}' (expected all, gam, foundation, or unmanaged)"),
+        },
+        Commands::Reconcile(args) => match args.command {
+            ReconcileCommands::Hold {
+                repo,
+                group,
+                email,
+                reason,
+                until,
+            } => {
+                let slug = group.strip_suffix("@cerebral.work").unwrap_or(&group);
+                let path = repo.join("directory/groups").join(format!("{slug}.yaml"));
+                if !path.exists() {
+                    bail!("unknown group {group} (no {})", path.display());
+                }
+                let text = std::fs::read_to_string(&path)?;
+                let updated = hold_text(&text, &email, &reason, until.as_deref())?;
+                std::fs::write(&path, updated)?;
+                let span = until.map(|u| format!(" (until {u})")).unwrap_or_default();
+                println!("held {email} in {}: {reason}{span}", path.display());
+            }
+            ReconcileCommands::Unhold { repo, group, email } => {
+                let slug = group.strip_suffix("@cerebral.work").unwrap_or(&group);
+                let path = repo.join("directory/groups").join(format!("{slug}.yaml"));
+                if !path.exists() {
+                    bail!("unknown group {group} (no {})", path.display());
+                }
+                let text = std::fs::read_to_string(&path)?;
+                let (updated, removed) = unhold_text(&text, &email)?;
+                if !removed {
+                    bail!("{email} has no hold entry in {}", path.display());
+                }
+                std::fs::write(&path, updated)?;
+                println!("removed hold for {email} in {}", path.display());
+            }
+            ReconcileCommands::VerifyDigest { expected, actual } => {
+                let d = plan_digest(&[], &[]);
+                let _ = d;
+                if let Some(msg) = apply_refusal(expected.as_deref(), &actual) {
+                    eprintln!("{msg}");
+                    std::process::exit(2);
+                }
+                println!("plan digest verified: {actual}");
+            }
+        },
+        Commands::Lifecycle(args) => match args.command {
+            LifecycleCommands::Onboard {
+                repo,
+                email,
+                given_name,
+                family_name,
+                org_unit,
+                groups,
+                sku_id,
+                no_license,
+                github,
+                github_orgs,
+                no_create,
+            } => {
+                let group_list: Vec<String> = groups
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let gh_orgs = if let Some(ref csv) = github_orgs {
+                    csv.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                } else if github.is_some() {
+                    let state = load_desired_state(&repo)?;
+                    state.github_orgs.keys().cloned().collect()
+                } else {
+                    Vec::new()
+                };
+                let req = OnboardRequest {
+                    email,
+                    given_name,
+                    family_name,
+                    org_unit,
+                    groups: group_list,
+                    sku_id: if no_license { None } else { Some(sku_id) },
+                    github_handle: github,
+                    github_orgs: gh_orgs,
+                    create: !no_create,
+                };
+                let touched = stage_onboard(&repo, &req)?;
+                println!("Staged onboarding changes in:");
+                for p in touched {
+                    println!("  {}", p.display());
+                }
+            }
+            LifecycleCommands::Offboard {
+                repo,
+                email,
+                finalize,
+            } => {
+                let touched = stage_offboard(&repo, &email, finalize)?;
+                let mode = if finalize {
+                    "finalize (T+30d)"
+                } else {
+                    "T0 immediate suspension"
+                };
+                println!("Staged offboarding ({mode}) for {email} in:");
+                for p in touched {
+                    println!("  {}", p.display());
+                }
+            }
+        },
+        Commands::Detectors(args) => match args.command {
+            DetectorCommands::UndeclaredGroups { repo, live_json } => {
+                let raw = std::fs::read_to_string(&live_json)?;
+                let groups: BTreeMap<String, Vec<LiveGroupMember>> = serde_json::from_str(&raw)?;
+                let declared = all_declared(&repo)?;
+                let unmanaged = unmanaged_declared(&repo.join("directory/groups-unmanaged.yaml"))?;
+                let (rc, lines, f) = undeclared_groups_report(&groups, &declared, &unmanaged);
+                for line in lines {
+                    println!("{line}");
+                }
+                f.write_to_env()?;
+                std::process::exit(rc);
+            }
+            DetectorCommands::OidcBindings { rbac_json } => {
+                let raw = std::fs::read_to_string(&rbac_json)?;
+                let val: serde_json::Value = serde_json::from_str(&raw)?;
+                let mut rbac = Rbac::default();
+                if let Some(arr) = val.get("cluster_roles").and_then(|v| v.as_array()) {
+                    for item in arr {
+                        if let Some(n) = item
+                            .get("metadata")
+                            .and_then(|m| m.get("name"))
+                            .and_then(|v| v.as_str())
+                        {
+                            rbac.cluster_roles.insert(n.to_string(), item.clone());
+                        }
+                    }
+                }
+                if let Some(arr) = val.get("roles").and_then(|v| v.as_array()) {
+                    for item in arr {
+                        let ns = item
+                            .get("metadata")
+                            .and_then(|m| m.get("namespace"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("default");
+                        if let Some(n) = item
+                            .get("metadata")
+                            .and_then(|m| m.get("name"))
+                            .and_then(|v| v.as_str())
+                        {
+                            rbac.roles
+                                .insert((ns.to_string(), n.to_string()), item.clone());
+                        }
+                    }
+                }
+                if let Some(arr) = val.get("cluster_role_bindings").and_then(|v| v.as_array()) {
+                    rbac.cluster_role_bindings = arr.clone();
+                }
+                if let Some(arr) = val.get("role_bindings").and_then(|v| v.as_array()) {
+                    rbac.role_bindings = arr.clone();
+                }
+                let (rc, lines, f) = evaluate_oidc_bindings(&rbac);
+                for line in lines {
+                    println!("{line}");
+                }
+                f.write_to_env()?;
+                std::process::exit(rc);
+            }
+            DetectorCommands::ReflexdAdmission {
+                declared,
+                policies_json,
+                namespaces_json,
+            } => {
+                let decl = load_declared_admission(&declared)?;
+                let pols: Vec<serde_json::Value> =
+                    serde_json::from_str(&std::fs::read_to_string(&policies_json)?)?;
+                let nss: Vec<serde_json::Value> =
+                    serde_json::from_str(&std::fs::read_to_string(&namespaces_json)?)?;
+                let (rc, lines, f) = evaluate_reflexd_admission(&decl, &pols, &nss);
+                for line in lines {
+                    println!("{line}");
+                }
+                f.write_to_env()?;
+                std::process::exit(rc);
+            }
+            DetectorCommands::RoleMatrixExpected { repo } => {
+                let cf = expected_cloudflare_emails(&repo)?;
+                let ts = expected_tailscale_admins(&repo)?;
+                let out = serde_json::json!({
+                    "cloudflare_emails": cf,
+                    "tailscale_admins": ts,
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
             }
         },
     }

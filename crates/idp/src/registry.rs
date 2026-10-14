@@ -139,6 +139,181 @@ pub const CONCLAVE_ELVES: &[ElfPersona] = &[
     },
 ];
 
+/// Extended estate Clockwork Elves (22 total: 16 core Conclave + 6 platform/memory/auth elves).
+pub const ALL_ESTATE_ELVES: &[ElfPersona] = &[
+    ElfPersona {
+        id: "sindri",
+        name: "Sindri",
+        repo: "revenant",
+        role: "coordinator / sensing",
+        desc: "Audit coordinator, system sensing, and health watchdog",
+    },
+    ElfPersona {
+        id: "idunn",
+        name: "Idunn",
+        repo: "sbx",
+        role: "containment / custody",
+        desc: "Linux sandbox isolation, packaging custody, and verification",
+    },
+    ElfPersona {
+        id: "brokkr",
+        name: "Brokkr",
+        repo: "kd",
+        role: "process supervisor",
+        desc: "Kernel daemon, pidfd lifecycle, and epoll supervisor",
+    },
+    ElfPersona {
+        id: "mimir",
+        name: "Mimir",
+        repo: "revenant",
+        role: "formal architect",
+        desc: "Operational semantics, protocol invariants, and LeanSpec models",
+    },
+    ElfPersona {
+        id: "loki",
+        name: "Loki",
+        repo: "revenant",
+        role: "concurrency / fuzzing",
+        desc: "Concurrency stress testing, race detection, and adversarial review",
+    },
+    ElfPersona {
+        id: "thjalfi",
+        name: "Thjalfi",
+        repo: "revenant",
+        role: "profiling / efficiency",
+        desc: "Instruction profiling, memory footprint optimization, and benchmarks",
+    },
+    ElfPersona {
+        id: "volva",
+        name: "Volva",
+        repo: "dgr",
+        role: "workflow orchestration",
+        desc: "DAG runtime engine, state graphs, and trajectory tracking",
+    },
+    ElfPersona {
+        id: "kratos",
+        name: "Kratos",
+        repo: "gs",
+        role: "cluster control",
+        desc: "Godseat cluster operator, invariant verification, and gate policy",
+    },
+    ElfPersona {
+        id: "sigyn",
+        name: "Sigyn",
+        repo: "ls",
+        role: "specification parser",
+        desc: "LeanSpec parser, AST validator, and CAS verification",
+    },
+    ElfPersona {
+        id: "alrisha",
+        name: "Alrisha",
+        repo: "awesome",
+        role: "ecosystem catalog",
+        desc: "Documentation integrity, link validation, and catalog curation",
+    },
+    ElfPersona {
+        id: "thuban",
+        name: "Thuban",
+        repo: "autoresearcher",
+        role: "autonomous research",
+        desc: "eBPF telemetry verification, iterative ratchets, and experimentation",
+    },
+    ElfPersona {
+        id: "gullveig",
+        name: "Gullveig",
+        repo: "ep",
+        role: "deterministic dispatch",
+        desc: "Escapement discrete time loopback proxy and egress regulation",
+    },
+    ElfPersona {
+        id: "heimdall",
+        name: "Heimdall",
+        repo: "wak",
+        role: "traffic gate",
+        desc: "Accept-and-hold wake gateway and TCP ingress management",
+    },
+    ElfPersona {
+        id: "forseti",
+        name: "Forseti",
+        repo: "k8",
+        role: "fleet reconciler",
+        desc: "Kubernetes reconciler, CRD controllers, and fleet gates",
+    },
+    ElfPersona {
+        id: "bragi",
+        name: "Bragi",
+        repo: ".github",
+        role: "constitutional charter",
+        desc: "Constitutional governance, CC0 licensing, and ASCII compliance",
+    },
+    ElfPersona {
+        id: "vali",
+        name: "Vali",
+        repo: "kl",
+        role: "kernel security",
+        desc: "Linux Landlock LSM, seccomp filters, and kernel link primitives",
+    },
+    ElfPersona {
+        id: "njord",
+        name: "Njord",
+        repo: "ch",
+        role: "cache store",
+        desc: "Distributed artifact cache and CAS storage broker",
+    },
+    ElfPersona {
+        id: "norns",
+        name: "Norns",
+        repo: "mem",
+        role: "memory continuity",
+        desc: "Long-term observation graph and session handoff weaver",
+    },
+    ElfPersona {
+        id: "sol",
+        name: "Sol",
+        repo: "search",
+        role: "index & retrieval",
+        desc: "Hybrid lexical/vector search and corpus indexing",
+    },
+    ElfPersona {
+        id: "vidar",
+        name: "Vidar",
+        repo: "auth",
+        role: "identity & attestation",
+        desc: "Identity reconciliation, token brokering, and attestation verification",
+    },
+    ElfPersona {
+        id: "ratatoskr",
+        name: "Ratatoskr",
+        repo: "bus",
+        role: "mesh courier",
+        desc: "Inter-agent message routing and event transport",
+    },
+    ElfPersona {
+        id: "tyr",
+        name: "Tyr",
+        repo: "gate",
+        role: "policy enforcement",
+        desc: "Capability envelope enforcement and admission control",
+    },
+];
+
+/// Looks up an elf persona by id across all 22 estate elves.
+pub fn find_elf(id: &str) -> Option<&'static ElfPersona> {
+    let needle = id.trim().to_ascii_lowercase();
+    let needle = needle.strip_suffix("-bot[bot]").unwrap_or(&needle);
+    let needle = needle.strip_suffix("-bot").unwrap_or(needle);
+    ALL_ESTATE_ELVES.iter().find(|e| e.id == needle)
+}
+
+/// Returns true if the given GitHub login or actor handle belongs to a registered Clockwork Elf or runner bot.
+pub fn is_automation_login(login: &str) -> bool {
+    let lower = login.trim().to_ascii_lowercase();
+    if lower == "runner-bot" || lower == "runner-bot[bot]" {
+        return true;
+    }
+    find_elf(&lower).is_some()
+}
+
 /// Host storage manager for bot private keys and registration metadata.
 pub struct KeyStore {
     base_dir: PathBuf,

@@ -1,0 +1,95 @@
+$schema: https://projectfile.org/schema/v1.json
+kind: SoftwareSourceCode
+
+identity:
+  namespace: gg.unsigned
+  name: idp
+  version: "0.1.0"
+  title:
+    en: "idp"
+  summary:
+    en: "Identity provider, Conclave bot manager, and declarative directory reconciliation engine."
+  created: "2026-10-12"
+  modified: "2026-10-14"
+
+repositories:
+  - url: "https://github.com/unsigned-gg/idp.git"
+    type: git
+    branch: main
+    role: origin
+
+links:
+  - type: source-code
+    url: https://github.com/unsigned-gg/idp
+  - type: bugs
+    url: https://github.com/unsigned-gg/idp/issues
+
+license:
+  spdx: Apache-2.0 OR MIT OR CC0-1.0
+  file: LICENSE-APACHE
+
+copyright:
+  year: 2026
+
+people:
+  - family-names: Todie
+    given-names: Christian M.
+    email: chris@todie.io
+    roles: [founder, author, maintainer, copyright]
+
+organizations:
+  - name: "Unsigned"
+    url: https://github.com/unsigned-gg
+    roles: [funder, copyright]
+
+keywords:
+  - identity
+  - github-app
+  - directory
+  - reconciliation
+  - rust
+
+technologies:
+  - rust
+  - serde
+  - clap
+  - axum
+  - reqwest
+
+requirements:
+  runtime:
+    rust: ">=1.85"
+
+org:
+  projectfile:
+    operating-system: [ linux ]
+    architecture: [ amd64 ]
+    ci:
+      nodes:
+        toolchain:
+          needs:
+            toolchain-check: true
+        hygiene:
+          needs:
+            toolchain: true
+            projectfile-check: true
+            spec-check: true
+            stages-check: true
+            zero-io-domain: true
+        formatted:
+          needs:
+            hygiene: true
+            cargo-fmt: true
+        linted:
+          needs:
+            formatted: true
+            cargo-clippy: true
+        tested:
+          needs:
+            linted: true
+            cargo-test: true
+        check:
+          goal: true
+          needs:
+            tested: true
+            cargo-doc-test: true

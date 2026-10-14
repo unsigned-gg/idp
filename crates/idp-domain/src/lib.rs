@@ -1,0 +1,27 @@
+// Copyright 2026 Christian M. Todie <chris@todie.io>
+// SPDX-License-Identifier: Apache-2.0 OR MIT OR CC0-1.0
+
+//! Wave-0 pure zero-I/O domain crate for `idp`.
+//!
+//! Contains pure algebraic types, the 4-tier [`Principal`] authorization lattice,
+//! [`CapabilityEnvelope`] policy evaluators, GitHub App [`AppManifest`] definitions,
+//! and constant-time comparison / secret redaction primitives.
+//!
+//! # Invariant
+//! Zero runtime I/O (`std::net`, `std::fs`, `std::process`, `tokio::`) is permitted in this crate.
+
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+
+pub mod manifest;
+pub mod principal;
+pub mod security;
+
+pub use manifest::{AppManifest, ConversionResponse, HookAttributes};
+pub use principal::{
+    CapabilityEnvelope, GroupDecision, PROHIBITED_SENSITIVE_PATHS, Principal,
+    SOLE_SUPERADMIN_EMAIL, SOLE_SUPERADMIN_GITHUB, SubjectMatterMesh, reconcile_group_decisions,
+};
+pub use security::{
+    COMPLIANCE_FAILED, COMPLIANCE_NOT_RUN, COMPLIANCE_OK, constant_time_eq, redact_password,
+    redact_tokens,
+};

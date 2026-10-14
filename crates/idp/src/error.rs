@@ -24,6 +24,14 @@ pub enum IdpError {
     #[error("JSON serialization error: {0}")]
     Json(#[from] serde_json::Error),
 
+    /// YAML serialization or deserialization error.
+    #[error("YAML serialization error: {0}")]
+    Yaml(#[from] serde_yaml::Error),
+
+    /// Validation or policy error.
+    #[error("Validation error: {0}")]
+    Validation(String),
+
     /// GitHub API returned an error status code or unexpected body.
     #[error("GitHub API error: status {status}, body: {body}")]
     GitHubApi {

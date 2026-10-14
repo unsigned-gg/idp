@@ -1,3 +1,8 @@
+---
+status: Active
+created: 2026-10-12
+---
+
 # SPEC-0001: Identity Provider and Conclave Bot Architecture
 
 - Status: Accepted

@@ -1,0 +1,22 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+
+- Extracted pure Wave-0 domain leaf crate `idp-domain` (`principal`, `security`, `manifest`) enforcing zero runtime I/O (`cargo xtask zero-io-domain`).
+- Extracted multi-plane identity primitives into `idp`:
+  - `directory`: Declarative `directory/` models (`users.yaml`, `groups/*.yaml`, `orgunits.yaml`, `licenses.yaml`, `access-matrix.yaml`), schema validators, and byte-preserving `held_exceptions` YAML editor (`hold_text`, `unhold_text`).
+  - `planes`: Group declaration planes (`gam`, `foundation`, `unmanaged`) and undeclared groups detector.
+  - `reconcile`: Google Workspace and GitHub reconciliation planner (`plan_orgunits`, `plan_users`, `plan_admin`, `plan_groups`, `plan_licenses`, `plan_github`), SHA-256 `plan_digest` gate, `apply_refusal`, and structured findings mapper.
+  - `presence`: Cross-system presence matrix (`users.yaml`, Google Workspace, GitHub orgs, Slack, GCP IAM, Gitea, Tailscale, Keycloak, Teleport, Bastion).
+  - `detectors`: Clause-tested Kubernetes RBAC (`detect_oidc_bindings`) and `NetworkPolicy` (`detect_reflexd_admission`) drift detectors.
+  - `findings`: Key-normalized deduplicated findings collector and `$FINDINGS_FILE` JSON emitter.
+  - `lifecycle`: User onboarding (`stage_onboard`) and two-stage offboarding (`stage_offboard`) primitives.
+- Added `xtask` workspace automation crate (`cargo xwork`, `cargo xtool`, `cargo xtask check --enforce-dbr --resume --break-check`, `cargo xtask graph-audit --break-check`, `projectfile-check`, `stages-check`, `spec-check`, `toolchain-check`, `branch-hygiene`).
+- Added `projectfile.yaml`, `rust-toolchain.toml` (`1.88.0`), and `.cargo/config.toml` (`xtask`, `xwork`, `xtool` aliases with `-j 2`).

@@ -1,4 +1,4 @@
-# Justfile for idp (Identity Provider & Conclave Bot Manager)
+# Justfile for idp (Identity Provider, Conclave Bot Manager & Directory Reconciler)
 # Host Throttling: Physical host ceres runs multiple active agent sessions.
 # Shared workstations keep jobs=2 to prevent CPU starvation and OOM.
 
@@ -14,9 +14,49 @@ default:
 help:
     @just --list 2>/dev/null || make help
 
+# Execute the full compiled projectfile.yaml CI DAG (cargo xwork)
+xwork:
+    cargo xwork
+
+# Run DBR-admitted verification pipeline with CAS receipts
+check:
+    cargo xtask check --enforce-dbr
+
+# Verify workspace crate DAG and Wave-0 idp-domain purity
+graph-audit:
+    cargo xtask graph-audit --break-check
+
+# Verify Wave-0 idp-domain has zero I/O or runtime dependencies
+zero-io-domain:
+    cargo xtask zero-io-domain
+
+# Validate projectfile.yaml schema and CI nodes
+projectfile-check:
+    cargo xtask projectfile-check
+
+# Verify stages.rs matches projectfile.yaml
+stages-check:
+    cargo xtask stages-check
+
+# Validate markdown specs in specs/*.md
+spec-check:
+    cargo xtask spec-check
+
+# Verify active rustc matches rust-toolchain.toml
+toolchain-check:
+    cargo xtask toolchain-check
+
+# Audit merged local git branches
+branch-hygiene:
+    cargo xtask branch-hygiene --dry-run
+
 # Compile the workspace with locked dependencies and host throttling
 build:
     cargo build --workspace -j {{jobs}}
+
+# Install idp CLI to ~/.cargo/bin/idp
+install:
+    cargo install --path crates/idp-cli -j {{jobs}}
 
 # Format all code
 fmt:
@@ -38,15 +78,11 @@ test:
 doc-test:
     cargo test --doc --workspace -j {{jobs}}
 
-# The push gate: fmt-check, clippy, test, doc-test
-check: fmt-check clippy test doc-test
-
 # What the CI rust job runs
 ci:
-    cargo fmt --all -- --check
-    cargo clippy --workspace --all-targets -j {{jobs}} -- -D warnings
-    cargo test --workspace -j {{jobs}}
-    cargo test --doc --workspace -j {{jobs}}
+    cargo xwork
+    cargo xtask graph-audit --break-check
+    cargo xtask check --break-check
 
 # Audit licenses, bans, and advisories
 deny:
@@ -59,4 +95,4 @@ audit:
 # Build CLI and run smoke tests
 smoke:
     cargo build --package idp-cli -j {{jobs}}
-    cargo run --package idp-cli -j {{jobs}} -- bot list
+    cargo run --package idp-cli -j {{jobs}} -- list

@@ -8,25 +8,26 @@ on:
 
 jobs:
   check:
-    name: Build & Test
+    name: Build & Verify (xwork + xtask)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Rust toolchain (1.88.0)
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.88.0"
           components: rustfmt, clippy
 
-      - name: Format check
-        run: cargo fmt --all -- --check
+      - name: Run xwork CI DAG
+        run: cargo xwork
 
-      - name: Clippy check
-        run: cargo clippy --workspace --all-targets -j 2 -- -D warnings
+      - name: Run graph-audit break-check
+        run: cargo xtask graph-audit --break-check
 
-      - name: Run tests
-        run: cargo test --workspace -j 2
+      - name: Run DBR pipeline break-check
+        run: cargo xtask check --break-check --enforce-dbr
 
-      - name: Smoke check
-        run: cargo run --package idp-cli -j 2 -- bot list
+      - name: Smoke check CLI
+        run: cargo run --package idp-cli -j 2 -- list

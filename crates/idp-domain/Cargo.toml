@@ -1,0 +1,18 @@
+[package]
+name = "idp-domain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Wave-0 pure zero-I/O identity domain types, 4-tier Principal lattice, capability envelopes, and redaction primitives"
+
+[lints]
+workspace = true
+
+[dependencies]
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true

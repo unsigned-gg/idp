@@ -22,8 +22,16 @@ missing_docs = "warn"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+dbg_macro = "warn"
+unnecessary_map_or = "warn"
 
 [workspace.dependencies]
+idp-domain = { path = "crates/idp-domain" }
+idp = { path = "crates/idp" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
@@ -37,10 +45,16 @@ axum = "0.8"
 jsonwebtoken = "10"
 chrono = { version = "0.4", features = ["serde"] }
 tempfile = "3"
+serde_yaml = "0.9"
+sha2 = "0.10"
+regex = "1"
 
 [profile.release]
 lto = true
 codegen-units = 1
 
 [profile.dev]
+debug = "line-tables-only"
+
+[profile.test]
 debug = "line-tables-only"

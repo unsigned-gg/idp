@@ -1,4 +1,4 @@
-# Makefile for kl
+# Makefile for idp
 # Standard POSIX wrapper that awk-parses recipes directly from Justfile.
 SHELL := bash
 .SHELLFLAGS := -euo pipefail -c

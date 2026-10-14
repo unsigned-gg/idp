@@ -34,7 +34,16 @@ pub fn check_toolchain(workspace_root: &Path) -> Result<(), String> {
 /// The `channel` value of a `rust-toolchain.toml` document: the first non-empty
 /// `channel = "..."` line.
 pub fn channel_of(content: &str) -> Option<String> {
-    let _ = content;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("channel") {
+            let rest = rest.trim().strip_prefix('=').unwrap_or("").trim();
+            let unquoted = rest.trim_matches('"').trim_matches('\'');
+            if !unquoted.is_empty() {
+                return Some(unquoted.to_string());
+            }
+        }
+    }
     None
 }
 
@@ -44,8 +53,30 @@ pub fn channel_of(content: &str) -> Option<String> {
 /// patch of that minor version. `stable`, `beta` and `nightly` channels cannot be compared and
 /// pass.
 pub fn verify_channel(channel: &str, rustc_line: &str) -> Result<(), String> {
-    let _ = (channel, rustc_line);
-    Err(String::new())
+    if ["stable", "beta", "nightly"]
+        .iter()
+        .any(|named| channel.starts_with(named))
+    {
+        return Ok(());
+    }
+    let actual = rustc_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| format!("Cannot parse `rustc --version` output {rustc_line:?}"))?;
+    let matches = match channel.split('.').count() {
+        2 => actual
+            .strip_prefix(channel)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .is_some_and(|patch| !patch.is_empty() && patch.chars().all(|c| c.is_ascii_digit())),
+        _ => actual == channel,
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(format!(
+            "Toolchain mismatch: rust-toolchain.toml expects '{channel}', active rustc is '{actual}'"
+        ))
+    }
 }
 
 #[cfg(test)]

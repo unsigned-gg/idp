@@ -101,8 +101,31 @@ enum Commands {
 
 /// The SPEC-0003 gate a command runs through `gates::run`, if it is one.
 fn gate_of(command: &Commands) -> Option<gates::Gate> {
-    let _ = command;
-    None
+    use gates::Gate;
+    Some(match command {
+        Commands::Tools => Gate::Tools,
+        Commands::ToolchainCheck => Gate::ToolchainCheck,
+        Commands::Fmt => Gate::Fmt,
+        Commands::FmtCheck => Gate::FmtCheck,
+        Commands::Clippy => Gate::Clippy,
+        Commands::Test => Gate::Test,
+        Commands::DocTest => Gate::DocTest,
+        Commands::Deny => Gate::Deny,
+        Commands::Typos => Gate::Typos,
+        Commands::Machete => Gate::Machete,
+        Commands::Ci => Gate::Ci,
+        Commands::Install => Gate::Install,
+        Commands::Xwork
+        | Commands::Xtool { .. }
+        | Commands::Check { .. }
+        | Commands::GraphAudit { .. }
+        | Commands::ZeroIoDomain
+        | Commands::ProjectfileCheck
+        | Commands::StagesCheck
+        | Commands::StagesGen
+        | Commands::SpecCheck
+        | Commands::BranchHygiene { .. } => return None,
+    })
 }
 
 #[derive(Subcommand)]

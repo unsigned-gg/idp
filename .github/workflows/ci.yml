@@ -24,10 +24,10 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Rust toolchain (1.88.0)
+      - name: Set up Rust toolchain (1.94.1)
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.88.0"
+          toolchain: "1.94.1"
           components: rustfmt, clippy
 
       - name: Run xwork CI DAG

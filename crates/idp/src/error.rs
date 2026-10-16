@@ -41,6 +41,19 @@ pub enum IdpError {
         body: String,
     },
 
+    /// Ory Hydra Public or Admin API returned an error status code or RFC 7591 error payload.
+    #[error("Ory Hydra API error: status {status}, body: {body}")]
+    HydraApi {
+        /// HTTP status code returned by Ory Hydra.
+        status: reqwest::StatusCode,
+        /// Response body or RFC 7591 error description from Ory Hydra.
+        body: String,
+    },
+
+    /// Dynamic Client Registration (RFC 7591) or RFC 8693 validation failure.
+    #[error("DCR validation error: {0}")]
+    DcrValidation(#[from] idp_domain::dcr::DcrValidationError),
+
     /// The specified bot identity was not found in the local registry.
     #[error("Bot identity '{0}' not found in registry")]
     BotNotFound(String),

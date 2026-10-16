@@ -20,3 +20,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `lifecycle`: User onboarding (`stage_onboard`) and two-stage offboarding (`stage_offboard`) primitives.
 - Added `xtask` workspace automation crate (`cargo xwork`, `cargo xtool`, `cargo xtask check --enforce-dbr --resume --break-check`, `cargo xtask graph-audit --break-check`, `projectfile-check`, `stages-check`, `spec-check`, `toolchain-check`, `branch-hygiene`).
 - Added `projectfile.yaml`, `rust-toolchain.toml` (`1.88.0`), and `.cargo/config.toml` (`xtask`, `xwork`, `xtool` aliases with `-j 2`).
+- Added Ory Hydra Dynamic Client Registration (RFC 7591 / RFC 7592), OAuth 2.0 Token Exchange (RFC 8693), Token Introspection (RFC 7662), and IETF `draft-klrc-aiagent-auth-03` WIMSE/SPIFFE Agent Identity adapter (`idp_domain::dcr`, `idp::hydra::OryHydraClient`, and `idp dcr` CLI subcommand).
+

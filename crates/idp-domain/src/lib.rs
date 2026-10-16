@@ -12,11 +12,21 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod dcr;
 pub mod manifest;
 pub mod principal;
 pub mod reconciler;
 pub mod security;
 
+pub use dcr::{
+    ActorClaim, AgentClientMetadata, CLIENT_ASSERTION_TYPE_JWT_BEARER, DcrValidationError,
+    ESTATE_SUPERUSER_SCOPE, GRANT_TYPE_JWT_BEARER, GRANT_TYPE_TOKEN_EXCHANGE,
+    IntrospectedOAuth2Token, OAuth2ClientMetadata, OAuth2GrantType, OAuth2ResponseType,
+    OAuth2TokenResponse, OidcDiscoveryDocument, Rfc7591ErrorCode, Rfc7591ErrorResponse,
+    TOKEN_TYPE_ACCESS_TOKEN, TOKEN_TYPE_ID_TOKEN, TOKEN_TYPE_JWT, TOKEN_TYPE_REFRESH_TOKEN,
+    TOKEN_TYPE_TRANSACTION_TOKEN, TokenEndpointAuthMethod, TokenExchangeRequest, WimseAgentId,
+    WimseScheme, decode_form_urlencoded, encode_form_urlencoded,
+};
 pub use manifest::{AppManifest, ConversionResponse, HookAttributes};
 pub use principal::{
     CapabilityEnvelope, GroupDecision, PROHIBITED_SENSITIVE_PATHS, Principal,

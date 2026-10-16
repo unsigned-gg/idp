@@ -17,6 +17,7 @@ pub mod detectors;
 pub mod directory;
 pub mod error;
 pub mod findings;
+pub mod hydra;
 pub mod lifecycle;
 pub mod planes;
 pub mod presence;
@@ -24,11 +25,19 @@ pub mod reconcile;
 pub mod registry;
 pub mod token;
 
+pub use idp_domain::dcr;
 pub use idp_domain::manifest;
 pub use idp_domain::principal;
 pub use idp_domain::security;
 pub use reconcile as reconciler;
 
+pub use dcr::{
+    ActorClaim, AgentClientMetadata, CLIENT_ASSERTION_TYPE_JWT_BEARER, DcrValidationError,
+    IntrospectedOAuth2Token, OAuth2ClientMetadata, OAuth2GrantType, OAuth2ResponseType,
+    OAuth2TokenResponse, OidcDiscoveryDocument, Rfc7591ErrorCode, Rfc7591ErrorResponse,
+    TOKEN_TYPE_ACCESS_TOKEN, TOKEN_TYPE_ID_TOKEN, TOKEN_TYPE_JWT, TokenEndpointAuthMethod,
+    TokenExchangeRequest, WimseAgentId, WimseScheme,
+};
 pub use detectors::{
     DeclaredAdmission, FORBIDDEN_APPPROJECT_KINDS, Grant, OIDC_PREFIX, Rbac, SubmissionPeer,
     WIDE_ROLES, admits_port, bound_groups, canonical_peer, describe_peer, evaluate_oidc_bindings,
@@ -43,6 +52,7 @@ pub use directory::{
 };
 pub use error::IdpError;
 pub use findings::{FindingItem, Findings, FindingsPayload, part};
+pub use hydra::{ClientAuth, OryHydraClient, OryHydraConfig, PrivateKeyJwtClaims};
 pub use lifecycle::{OnboardRequest, stage_offboard, stage_onboard};
 pub use manifest::{AppManifest, ConversionResponse, HookAttributes};
 pub use planes::{

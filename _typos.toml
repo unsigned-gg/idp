@@ -1,0 +1,5 @@
+# typos config (cargo xtask typos, SPEC-0003).
+
+[default.extend-words]
+# GAM (Google Apps Manager) is the group-declaration plane the directory reconciler reads.
+gam = "gam"

@@ -4,3 +4,5 @@ target/
 *~
 .DS_Store
 Cargo.lock
+# Pinned gate tools that `cargo xtask tools` installs (SPEC-0003, XT-3)
+/.tools/

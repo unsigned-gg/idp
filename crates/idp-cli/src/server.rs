@@ -494,12 +494,7 @@ pub fn build_bot_dcr_metadata(
         .map_err(|e| e.to_string())?;
 
     let scope_set: std::collections::BTreeSet<String> = scopes
-        .unwrap_or_else(|| {
-            vec![
-                "openid".to_string(),
-                "estate:agent:execute".to_string(),
-            ]
-        })
+        .unwrap_or_else(|| vec!["openid".to_string(), "estate:agent:execute".to_string()])
         .into_iter()
         .filter(|s| !s.trim().is_empty())
         .collect();
@@ -537,7 +532,9 @@ async fn dcr_metadata_handler(
         Ok(meta) => (StatusCode::OK, Json(meta)).into_response(),
         Err(msg) => (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "invalid_client_metadata", "error_description": msg })),
+            Json(
+                serde_json::json!({ "error": "invalid_client_metadata", "error_description": msg }),
+            ),
         )
             .into_response(),
     }
@@ -737,7 +734,10 @@ mod tests {
         // 4. Positive control: write PEM key and verify /.well-known/jwks/sindri.json returns 200 OK
         state
             .key_store
-            .write_key("sindri", "-----BEGIN RSA PRIVATE KEY-----\nTEST_SINDRI_KEY\n-----END RSA PRIVATE KEY-----\n")
+            .write_key(
+                "sindri",
+                "-----BEGIN RSA PRIVATE KEY-----\nTEST_SINDRI_KEY\n-----END RSA PRIVATE KEY-----\n",
+            )
             .expect("write sindri key");
 
         let ok_jwks = http
@@ -825,11 +825,13 @@ mod tests {
 
         // Verify by a second path: read the persisted receipt from disk and confirm secrets are redacted
         let receipt_path = temp.path().join("sindri-dcr.json");
-        assert!(receipt_path.exists(), "sindri-dcr.json must be written to KeyStore");
+        assert!(
+            receipt_path.exists(),
+            "sindri-dcr.json must be written to KeyStore"
+        );
         let persisted_raw = std::fs::read_to_string(&receipt_path).expect("read receipt");
         assert!(!persisted_raw.contains("super-secret-do-not-persist"));
         assert!(!persisted_raw.contains("rat-secret-token"));
         assert!(persisted_raw.contains("hydra-elf-sindri-001"));
     }
 }
-

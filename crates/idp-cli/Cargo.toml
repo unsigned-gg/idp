@@ -30,3 +30,8 @@ reqwest.workspace = true
 axum.workspace = true
 serde_yaml.workspace = true
 chrono.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+

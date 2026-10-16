@@ -1,33 +1,87 @@
 // Copyright 2026 Christian M. Todie <chris@todie.io>
 // SPDX-License-Identifier: Apache-2.0 OR MIT OR CC0-1.0
 
-//! Local HTTP server providing the Conclave App Manifest minting dashboard and callback handler.
+//! Local HTTP server providing the Conclave App Manifest minting dashboard, JWKS discovery, and RFC 7591 DCR endpoints.
 
 use axum::{
-    Router,
-    extract::{Query, State},
+    Json, Router,
+    extract::{Path, Query, State},
     response::{Html, IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
+use idp::dcr::{OAuth2ClientMetadata, WimseAgentId};
+use idp::hydra::{OryHydraClient, OryHydraConfig};
 use idp::manifest::AppManifest;
-use idp::registry::{CONCLAVE_ELVES, KeyStore};
+use idp::principal::SubjectMatterMesh;
+use idp::registry::{ALL_ESTATE_ELVES, CONCLAVE_ELVES, KeyStore};
 use reqwest::StatusCode;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Shared application state for the minting server.
+/// Shared application state for the minting and DCR server.
 pub struct AppState {
     /// Public base URL (e.g. Cloudflare tunnel or localhost).
     pub public_url: String,
     /// Backing key store for saving credentials.
     pub key_store: KeyStore,
+    /// WIMSE/SPIFFE trust domain (default: `estate.cerebral.work`).
+    pub trust_domain: String,
+    /// Optional default Ory Hydra Public API base URL for `/dcr/register`.
+    pub hydra_public_url: Option<String>,
 }
 
-/// Constructs the Axum router for the minting server.
+/// Request payload for `POST /dcr/register`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DcrRegisterRequest {
+    /// Conclave elf identifier (e.g. `sindri`, `idunn`, `brokkr`).
+    pub bot: String,
+    /// Optional Ory Hydra Public API base URL override.
+    #[serde(default)]
+    pub hydra_public_url: Option<String>,
+    /// Optional RFC 7591 initial access token.
+    #[serde(default)]
+    pub initial_access_token: Option<String>,
+    /// Optional OAuth2 scopes list (defaults to `["openid", "estate:agent:execute"]`).
+    #[serde(default)]
+    pub scopes: Option<Vec<String>>,
+    /// Optional audience URIs (defaults to `["https://api.cerebral.work"]`).
+    #[serde(default)]
+    pub audiences: Option<Vec<String>>,
+}
+
+/// Public JWK descriptor served at `/.well-known/jwks/{bot}.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PublicJwkDescriptor {
+    /// Key type (`RSA`).
+    pub kty: String,
+    /// Public key use (`sig`).
+    #[serde(rename = "use")]
+    pub key_use: String,
+    /// Signing algorithm (`RS256`).
+    pub alg: String,
+    /// Deterministic key identifier (`<bot>-<sha256_prefix>`).
+    pub kid: String,
+    /// Bot WIMSE SPIFFE URI bound to this key.
+    pub x5u_spiffe_id: String,
+}
+
+/// RFC 7517 JWK Set document served at `/.well-known/jwks/{bot}.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PublicJwkSet {
+    /// Active signing keys for the Conclave bot.
+    pub keys: Vec<PublicJwkDescriptor>,
+}
+
+/// Constructs the Axum router for the minting and DCR server.
 pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index_handler))
         .route("/callback", get(callback_handler))
+        .route("/dcr/metadata/{bot}", get(dcr_metadata_handler))
+        .route("/dcr/register", post(dcr_register_handler))
+        .route("/.well-known/jwks/{bot}", get(jwks_handler))
         .with_state(state)
 }
 
@@ -403,3 +457,379 @@ async fn callback_handler(
 
     Html(html).into_response()
 }
+
+/// Resolves the canonical [`SubjectMatterMesh`] for a Conclave elf persona slug.
+pub fn mesh_for_bot(bot: &str) -> SubjectMatterMesh {
+    match bot {
+        "idunn" | "brokkr" | "vali" | "gullveig" | "heimdall" => SubjectMatterMesh::KernelRuntime,
+        "mimir" | "loki" | "thjalfi" | "sigyn" | "thuban" | "njord" | "norns" | "sol" => {
+            SubjectMatterMesh::MemorySearch
+        }
+        "vidar" | "tyr" | "bragi" => SubjectMatterMesh::IdentityGovernance,
+        "alrisha" => SubjectMatterMesh::EcosystemCatalog,
+        "sindri" | "volva" | "kratos" | "forseti" | "ratatoskr" => {
+            SubjectMatterMesh::PlatformControl
+        }
+        _ => SubjectMatterMesh::KernelRuntime,
+    }
+}
+
+/// Checks if `bot_id` is a registered Conclave or extended estate elf.
+pub fn is_known_elf(bot_id: &str) -> bool {
+    ALL_ESTATE_ELVES.iter().any(|e| e.id == bot_id)
+}
+
+/// Builds a validated [`OAuth2ClientMetadata`] for `bot_id` using the server's `AppState`.
+pub fn build_bot_dcr_metadata(
+    state: &AppState,
+    bot_id: &str,
+    scopes: Option<Vec<String>>,
+    audiences: Option<Vec<String>>,
+) -> Result<OAuth2ClientMetadata, String> {
+    if !is_known_elf(bot_id) {
+        return Err(format!("Unknown Conclave elf identity: '{bot_id}'"));
+    }
+    let mesh = mesh_for_bot(bot_id);
+    let agent_id = WimseAgentId::for_conclave_elf(&state.trust_domain, bot_id, mesh)
+        .map_err(|e| e.to_string())?;
+
+    let scope_set: std::collections::BTreeSet<String> = scopes
+        .unwrap_or_else(|| {
+            vec![
+                "openid".to_string(),
+                "estate:agent:execute".to_string(),
+            ]
+        })
+        .into_iter()
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+
+    let aud_vec: Vec<String> = audiences
+        .unwrap_or_else(|| vec!["https://api.cerebral.work".to_string()])
+        .into_iter()
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+
+    let jwks_uri = format!(
+        "{}/.well-known/jwks/{bot_id}.json",
+        state.public_url.trim_end_matches('/')
+    );
+
+    let meta = OAuth2ClientMetadata::for_agent(
+        &agent_id,
+        Some(bot_id),
+        Some(mesh),
+        &scope_set,
+        aud_vec,
+        Some(jwks_uri),
+    );
+    meta.validate_rfc7591(true).map_err(|e| e.to_string())?;
+    Ok(meta)
+}
+
+/// Handler for `GET /dcr/metadata/{bot}` returning RFC 7591 + WIMSE client metadata JSON.
+async fn dcr_metadata_handler(
+    State(state): State<Arc<AppState>>,
+    Path(bot): Path<String>,
+) -> Response {
+    let bot_id = bot.trim_end_matches(".json");
+    match build_bot_dcr_metadata(&state, bot_id, None, None) {
+        Ok(meta) => (StatusCode::OK, Json(meta)).into_response(),
+        Err(msg) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid_client_metadata", "error_description": msg })),
+        )
+            .into_response(),
+    }
+}
+
+/// Handler for `GET /.well-known/jwks/{bot}` serving the bot's public JWK Set descriptor.
+async fn jwks_handler(State(state): State<Arc<AppState>>, Path(bot): Path<String>) -> Response {
+    let bot_id = bot.trim_end_matches(".json");
+    if !is_known_elf(bot_id) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "unknown_bot", "bot": bot_id })),
+        )
+            .into_response();
+    }
+
+    let pem = match state.key_store.read_key(bot_id) {
+        Ok(k) => k,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "key_missing",
+                    "error_description": format!("No minted key found in KeyStore for '{bot_id}'")
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut hasher = Sha256::new();
+    hasher.update(pem.as_bytes());
+    let digest = hasher.finalize();
+    let hex_prefix: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    let kid = format!("{bot_id}-{hex_prefix}");
+
+    let mesh = mesh_for_bot(bot_id);
+    let spiffe_uri = match WimseAgentId::for_conclave_elf(&state.trust_domain, bot_id, mesh) {
+        Ok(id) => id.to_uri(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": "invalid_spiffe_id", "error_description": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let jwks = PublicJwkSet {
+        keys: vec![PublicJwkDescriptor {
+            kty: "RSA".to_string(),
+            key_use: "sig".to_string(),
+            alg: "RS256".to_string(),
+            kid,
+            x5u_spiffe_id: spiffe_uri,
+        }],
+    };
+    (StatusCode::OK, Json(jwks)).into_response()
+}
+
+/// Handler for `POST /dcr/register` registering a Conclave Elf with Ory Hydra via RFC 7591.
+async fn dcr_register_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<DcrRegisterRequest>,
+) -> Response {
+    let hydra_url = match req
+        .hydra_public_url
+        .clone()
+        .or_else(|| state.hydra_public_url.clone())
+    {
+        Some(u) if !u.trim().is_empty() => u,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "missing_hydra_url",
+                    "error_description": "hydra_public_url must be provided in request or server --hydra-url"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let meta = match build_bot_dcr_metadata(&state, &req.bot, req.scopes, req.audiences) {
+        Ok(m) => m,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_client_metadata",
+                    "error_description": msg
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let cfg = OryHydraConfig {
+        public_url: hydra_url.clone(),
+        admin_url: hydra_url,
+        initial_access_token: req.initial_access_token,
+        admin_bearer_token: None,
+        require_cryptographic_agent_auth: true,
+    };
+    let client = OryHydraClient::with_config(cfg);
+    let registered = match client.register_client_rfc7591(&meta).await {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": "hydra_registration_failed",
+                    "error_description": e.to_string()
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let redacted = registered.redacted();
+    if let Ok(json_text) = serde_json::to_string_pretty(&redacted) {
+        let _ = state
+            .key_store
+            .write_metadata(&format!("{}-dcr", req.bot), &json_text);
+    }
+
+    (StatusCode::CREATED, Json(redacted)).into_response()
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    async fn spawn_test_server(state: Arc<AppState>) -> String {
+        let app = create_router(state);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn test_dcr_metadata_and_jwks_positive_and_negative_controls() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = KeyStore::new(temp.path());
+        store.ensure_dir().expect("ensure_dir");
+
+        let state = Arc::new(AppState {
+            public_url: "https://idp.cerebral.work".to_string(),
+            key_store: store,
+            trust_domain: "estate.cerebral.work".to_string(),
+            hydra_public_url: None,
+        });
+
+        let base_url = spawn_test_server(state.clone()).await;
+        let http = reqwest::Client::new();
+
+        // 1. Positive control: GET /dcr/metadata/sindri returns valid RFC 7591 + WIMSE metadata
+        let meta_resp = http
+            .get(format!("{base_url}/dcr/metadata/sindri"))
+            .send()
+            .await
+            .expect("send metadata req");
+        assert_eq!(meta_resp.status(), StatusCode::OK);
+        let meta: OAuth2ClientMetadata = meta_resp.json().await.expect("parse metadata");
+        assert_eq!(
+            meta.software_id.as_deref(),
+            Some("spiffe://estate.cerebral.work/elf/platform-control/sindri")
+        );
+        assert_eq!(
+            meta.jwks_uri.as_deref(),
+            Some("https://idp.cerebral.work/.well-known/jwks/sindri.json")
+        );
+
+        // 2. Negative control: unknown bot returns 400 Bad Request
+        let bad_meta = http
+            .get(format!("{base_url}/dcr/metadata/nonexistent-bot"))
+            .send()
+            .await
+            .expect("send bad metadata req");
+        assert_eq!(bad_meta.status(), StatusCode::BAD_REQUEST);
+
+        // 3. Negative control: /.well-known/jwks/sindri.json returns 404 before key is minted
+        let missing_jwks = http
+            .get(format!("{base_url}/.well-known/jwks/sindri.json"))
+            .send()
+            .await
+            .expect("send missing jwks");
+        assert_eq!(missing_jwks.status(), StatusCode::NOT_FOUND);
+
+        // 4. Positive control: write PEM key and verify /.well-known/jwks/sindri.json returns 200 OK
+        state
+            .key_store
+            .write_key("sindri", "-----BEGIN RSA PRIVATE KEY-----\nTEST_SINDRI_KEY\n-----END RSA PRIVATE KEY-----\n")
+            .expect("write sindri key");
+
+        let ok_jwks = http
+            .get(format!("{base_url}/.well-known/jwks/sindri.json"))
+            .send()
+            .await
+            .expect("send ok jwks");
+        assert_eq!(ok_jwks.status(), StatusCode::OK);
+        let jwk_set: PublicJwkSet = ok_jwks.json().await.expect("parse jwks");
+        assert_eq!(jwk_set.keys.len(), 1);
+        assert_eq!(jwk_set.keys[0].kty, "RSA");
+        assert_eq!(jwk_set.keys[0].alg, "RS256");
+        assert!(jwk_set.keys[0].kid.starts_with("sindri-"));
+        assert_eq!(
+            jwk_set.keys[0].x5u_spiffe_id,
+            "spiffe://estate.cerebral.work/elf/platform-control/sindri"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_dcr_register_round_trip_and_keystore_receipt() {
+        // Spawn a mock Ory Hydra /oauth2/register endpoint
+        let hydra_router = Router::new().route(
+            "/oauth2/register",
+            post(|Json(meta): Json<OAuth2ClientMetadata>| async move {
+                (
+                    StatusCode::CREATED,
+                    Json(serde_json::json!({
+                        "client_id": "hydra-elf-sindri-001",
+                        "client_secret": "super-secret-do-not-persist",
+                        "registration_access_token": "rat-secret-token",
+                        "client_name": meta.client_name,
+                        "token_endpoint_auth_method": meta.token_endpoint_auth_method,
+                        "grant_types": meta.grant_types,
+                        "response_types": meta.response_types,
+                        "scope": meta.scope,
+                        "audience": meta.audience,
+                        "jwks_uri": meta.jwks_uri,
+                        "software_id": meta.software_id,
+                        "metadata": meta.metadata
+                    })),
+                )
+            }),
+        );
+        let hydra_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock hydra");
+        let hydra_addr = hydra_listener.local_addr().expect("hydra addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(hydra_listener, hydra_router).await;
+        });
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = KeyStore::new(temp.path());
+        store.ensure_dir().expect("ensure_dir");
+
+        let state = Arc::new(AppState {
+            public_url: "https://idp.cerebral.work".to_string(),
+            key_store: store,
+            trust_domain: "estate.cerebral.work".to_string(),
+            hydra_public_url: Some(format!("http://{hydra_addr}")),
+        });
+
+        let base_url = spawn_test_server(state.clone()).await;
+        let http = reqwest::Client::new();
+
+        let resp = http
+            .post(format!("{base_url}/dcr/register"))
+            .json(&DcrRegisterRequest {
+                bot: "sindri".to_string(),
+                hydra_public_url: None,
+                initial_access_token: None,
+                scopes: None,
+                audiences: None,
+            })
+            .send()
+            .await
+            .expect("post /dcr/register");
+
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body: serde_json::Value = resp.json().await.expect("parse response");
+        assert_eq!(body["client_id"], "hydra-elf-sindri-001");
+        assert_eq!(body["client_secret"], "<redacted>");
+        assert_eq!(body["registration_access_token"], "<redacted>");
+
+        // Verify by a second path: read the persisted receipt from disk and confirm secrets are redacted
+        let receipt_path = temp.path().join("sindri-dcr.json");
+        assert!(receipt_path.exists(), "sindri-dcr.json must be written to KeyStore");
+        let persisted_raw = std::fs::read_to_string(&receipt_path).expect("read receipt");
+        assert!(!persisted_raw.contains("super-secret-do-not-persist"));
+        assert!(!persisted_raw.contains("rat-secret-token"));
+        assert!(persisted_raw.contains("hydra-elf-sindri-001"));
+    }
+}
+

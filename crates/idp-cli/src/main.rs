@@ -23,7 +23,6 @@ use idp::planes::{
     LiveGroupMember, all_declared, foundation_declared, gam_declared, undeclared_groups_report,
     unmanaged_declared,
 };
-use idp::principal::SubjectMatterMesh;
 use idp::reconcile::{
     LiveDirectoryState, apply_refusal, plan_digest, plan_findings, reconcile_directory, redact,
 };
@@ -106,7 +105,7 @@ enum ManifestCommands {
         redirect_url: String,
     },
 
-    /// Launch local web server to mint GitHub App identities via browser
+    /// Launch local web server to mint GitHub App identities and serve RFC 7591 DCR / JWKS routes
     Serve {
         /// Local port to listen on
         #[arg(long, default_value_t = 8787)]
@@ -115,6 +114,14 @@ enum ManifestCommands {
         /// Explicit public base URL (e.g. Cloudflare tunnel)
         #[arg(long)]
         public_url: Option<String>,
+
+        /// WIMSE/SPIFFE trust domain for Conclave Elf identities
+        #[arg(long, default_value = "estate.cerebral.work")]
+        trust_domain: String,
+
+        /// Optional Ory Hydra Public API base URL for `/dcr/register`
+        #[arg(long)]
+        hydra_url: Option<String>,
     },
 }
 
@@ -421,19 +428,28 @@ async fn main() -> Result<()> {
                     .context("Failed to serialize manifest")?;
                 println!("{json}");
             }
-            ManifestCommands::Serve { port, public_url } => {
+            ManifestCommands::Serve {
+                port,
+                public_url,
+                trust_domain,
+                hydra_url,
+            } => {
                 let public_url = public_url.unwrap_or_else(|| format!("http://127.0.0.1:{port}"));
                 let state = Arc::new(AppState {
                     public_url: public_url.clone(),
                     key_store,
+                    trust_domain,
+                    hydra_public_url: hydra_url,
                 });
 
                 let app = create_router(state);
                 let addr = SocketAddr::from(([0, 0, 0, 0], port));
                 info!("Listening on http://{addr}");
                 println!("============================================================");
-                println!("  Clockwork Conclave Mint Server Live");
+                println!("  Clockwork Conclave Mint & DCR Server Live");
                 println!("  Dashboard: {public_url}");
+                println!("  JWKS:      {public_url}/.well-known/jwks/{{bot}}.json");
+                println!("  DCR:       {public_url}/dcr/register");
                 println!("  Local:     http://127.0.0.1:{port}");
                 println!("============================================================");
 
@@ -812,7 +828,7 @@ async fn main() -> Result<()> {
                 audiences,
                 jwks_uri,
             } => {
-                let mesh = SubjectMatterMesh::KernelRuntime;
+                let mesh = server::mesh_for_bot(&bot);
                 let agent_id = WimseAgentId::for_conclave_elf(&trust_domain, &bot, mesh)?;
                 let scope_set: std::collections::BTreeSet<String> = scopes
                     .split(',')
@@ -848,7 +864,7 @@ async fn main() -> Result<()> {
                 jwks_uri,
                 initial_access_token,
             } => {
-                let mesh = SubjectMatterMesh::KernelRuntime;
+                let mesh = server::mesh_for_bot(&bot);
                 let agent_id = WimseAgentId::for_conclave_elf(&trust_domain, &bot, mesh)?;
                 let scope_set: std::collections::BTreeSet<String> = scopes
                     .split(',')

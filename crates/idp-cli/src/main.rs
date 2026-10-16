@@ -8,6 +8,7 @@ mod server;
 use anyhow::{Context, Result, bail};
 use chrono::{NaiveDate, Utc};
 use clap::{Args, Parser, Subcommand};
+use idp::dcr::{OAuth2ClientMetadata, WimseAgentId};
 use idp::detectors::{
     Rbac, evaluate_oidc_bindings, evaluate_reflexd_admission, evaluate_tenant_appprojects,
     expected_cloudflare_emails, expected_tailscale_admins, load_declared_admission,
@@ -15,12 +16,14 @@ use idp::detectors::{
 use idp::directory::{
     hold_text, load_desired_state, unhold_text, validate_directory_schema, validate_identity_models,
 };
+use idp::hydra::{OryHydraClient, OryHydraConfig};
 use idp::lifecycle::{OnboardRequest, stage_offboard, stage_onboard};
 use idp::manifest::AppManifest;
 use idp::planes::{
     LiveGroupMember, all_declared, foundation_declared, gam_declared, undeclared_groups_report,
     unmanaged_declared,
 };
+use idp::principal::SubjectMatterMesh;
 use idp::reconcile::{
     LiveDirectoryState, apply_refusal, plan_digest, plan_findings, reconcile_directory, redact,
 };
@@ -79,6 +82,9 @@ enum Commands {
 
     /// Run clause-tested identity detectors over JSON snapshots or repository state
     Detectors(DetectorArgs),
+
+    /// Ory Hydra Dynamic Client Registration (RFC 7591) and WIMSE/SPIFFE Agent Identity operations
+    Dcr(DcrArgs),
 }
 
 #[derive(Args)]
@@ -326,6 +332,78 @@ enum DetectorCommands {
         /// Path to the identity repository root
         #[arg(long, default_value = ".")]
         repo: PathBuf,
+    },
+}
+
+#[derive(Args)]
+struct DcrArgs {
+    #[command(subcommand)]
+    command: DcrCommands,
+}
+
+#[derive(Subcommand)]
+enum DcrCommands {
+    /// Generate and validate RFC 7591 + WIMSE/SPIFFE agent OAuth2 client metadata JSON
+    Metadata {
+        /// Conclave elf persona slug (e.g. sindri, idunn, brokkr)
+        #[arg(long, default_value = "sindri")]
+        bot: String,
+        /// WIMSE/SPIFFE trust domain
+        #[arg(long, default_value = "estate.cerebral.work")]
+        trust_domain: String,
+        /// Comma-separated OAuth2 scopes
+        #[arg(long, default_value = "openid,estate:agent:execute")]
+        scopes: String,
+        /// Comma-separated target resource audiences
+        #[arg(long, default_value = "https://api.cerebral.work")]
+        audiences: String,
+        /// Optional JWKS URI for `private_key_jwt` validation
+        #[arg(long)]
+        jwks_uri: Option<String>,
+    },
+
+    /// Register a WIMSE/SPIFFE agent client with Ory Hydra via RFC 7591 (`/oauth2/register`)
+    Register {
+        /// Ory Hydra Public API base URL (e.g. `https://hydra.cerebral.work`)
+        #[arg(long)]
+        public_url: String,
+        /// Optional Ory Hydra Admin API base URL
+        #[arg(long)]
+        admin_url: Option<String>,
+        /// Conclave elf persona slug (e.g. sindri, idunn, brokkr)
+        #[arg(long, default_value = "sindri")]
+        bot: String,
+        /// WIMSE/SPIFFE trust domain
+        #[arg(long, default_value = "estate.cerebral.work")]
+        trust_domain: String,
+        /// Comma-separated OAuth2 scopes
+        #[arg(long, default_value = "openid,estate:agent:execute")]
+        scopes: String,
+        /// Comma-separated target resource audiences
+        #[arg(long, default_value = "https://api.cerebral.work")]
+        audiences: String,
+        /// Optional JWKS URI for `private_key_jwt` validation
+        #[arg(long)]
+        jwks_uri: Option<String>,
+        /// Optional RFC 7591 initial access token
+        #[arg(long)]
+        initial_access_token: Option<String>,
+    },
+
+    /// Introspect an OAuth2 token against Ory Hydra (`/admin/oauth2/introspect`) and evaluate its `Principal` tier
+    Introspect {
+        /// Ory Hydra Admin API base URL (e.g. `http://127.0.0.1:4445`)
+        #[arg(long)]
+        admin_url: String,
+        /// Optional Ory Hydra Public API base URL
+        #[arg(long, default_value = "http://127.0.0.1:4444")]
+        public_url: String,
+        /// OAuth2 access token to introspect
+        #[arg(long)]
+        token: String,
+        /// Optional space-separated required scopes filter
+        #[arg(long)]
+        scope: Option<String>,
     },
 }
 
@@ -722,6 +800,117 @@ async fn main() -> Result<()> {
                 let out = serde_json::json!({
                     "cloudflare_emails": cf,
                     "tailscale_admins": ts,
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            }
+        },
+        Commands::Dcr(args) => match args.command {
+            DcrCommands::Metadata {
+                bot,
+                trust_domain,
+                scopes,
+                audiences,
+                jwks_uri,
+            } => {
+                let mesh = SubjectMatterMesh::KernelRuntime;
+                let agent_id = WimseAgentId::for_conclave_elf(&trust_domain, &bot, mesh)?;
+                let scope_set: std::collections::BTreeSet<String> = scopes
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let aud_vec: Vec<String> = audiences
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let resolved_jwks = jwks_uri.unwrap_or_else(|| {
+                    format!("https://{trust_domain}/.well-known/jwks/{bot}.json")
+                });
+                let meta = OAuth2ClientMetadata::for_agent(
+                    &agent_id,
+                    Some(&bot),
+                    Some(mesh),
+                    &scope_set,
+                    aud_vec,
+                    Some(resolved_jwks),
+                );
+                meta.validate_rfc7591(true)?;
+                println!("{}", serde_json::to_string_pretty(&meta.redacted())?);
+            }
+            DcrCommands::Register {
+                public_url,
+                admin_url,
+                bot,
+                trust_domain,
+                scopes,
+                audiences,
+                jwks_uri,
+                initial_access_token,
+            } => {
+                let mesh = SubjectMatterMesh::KernelRuntime;
+                let agent_id = WimseAgentId::for_conclave_elf(&trust_domain, &bot, mesh)?;
+                let scope_set: std::collections::BTreeSet<String> = scopes
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let aud_vec: Vec<String> = audiences
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                let resolved_jwks = jwks_uri.unwrap_or_else(|| {
+                    format!("https://{trust_domain}/.well-known/jwks/{bot}.json")
+                });
+                let meta = OAuth2ClientMetadata::for_agent(
+                    &agent_id,
+                    Some(&bot),
+                    Some(mesh),
+                    &scope_set,
+                    aud_vec,
+                    Some(resolved_jwks),
+                );
+                let cfg = OryHydraConfig {
+                    public_url: public_url.clone(),
+                    admin_url: admin_url.unwrap_or(public_url),
+                    initial_access_token,
+                    admin_bearer_token: None,
+                    require_cryptographic_agent_auth: true,
+                };
+                let client = OryHydraClient::with_config(cfg);
+                let registered = client.register_client_rfc7591(&meta).await?;
+                println!("{}", serde_json::to_string_pretty(&registered.redacted())?);
+            }
+            DcrCommands::Introspect {
+                admin_url,
+                public_url,
+                token,
+                scope,
+            } => {
+                let cfg = OryHydraConfig {
+                    public_url,
+                    admin_url,
+                    initial_access_token: None,
+                    admin_bearer_token: None,
+                    require_cryptographic_agent_auth: false,
+                };
+                let client = OryHydraClient::with_config(cfg);
+                let introspected = client.introspect_token(&token, scope.as_deref()).await?;
+                let now_epoch = u64::try_from(Utc::now().timestamp()).unwrap_or(0);
+                let principal = introspected.to_principal(now_epoch);
+                let actor_chain = introspected
+                    .act
+                    .as_ref()
+                    .map(|a| a.chain_subjects())
+                    .unwrap_or_default();
+                let out = serde_json::json!({
+                    "active": introspected.active,
+                    "client_id": introspected.client_id,
+                    "sub": introspected.sub,
+                    "resolved_actor": introspected.resolved_actor(),
+                    "actor_chain": actor_chain,
+                    "principal": format!("{principal:?}"),
                 });
                 println!("{}", serde_json::to_string_pretty(&out)?);
             }

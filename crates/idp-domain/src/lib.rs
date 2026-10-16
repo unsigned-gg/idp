@@ -29,8 +29,10 @@ pub use dcr::{
 };
 pub use manifest::{AppManifest, ConversionResponse, HookAttributes};
 pub use principal::{
-    CapabilityEnvelope, GroupDecision, PROHIBITED_SENSITIVE_PATHS, Principal,
-    SOLE_SUPERADMIN_EMAIL, SOLE_SUPERADMIN_GITHUB, SubjectMatterMesh, reconcile_group_decisions,
+    CapabilityEnvelope, DELEGATED_SOVEREIGN_ROOT_EMAIL, DELEGATED_SOVEREIGN_ROOT_GITHUB,
+    GroupDecision, PROHIBITED_SENSITIVE_PATHS, Principal, SOLE_SUPERADMIN_EMAIL,
+    SOLE_SUPERADMIN_GITHUB, SubjectMatterMesh, is_sovereign_root_email, is_sovereign_root_github,
+    reconcile_group_decisions,
 };
 pub use reconciler::{
     GroupRecord, HeldException, LicenseRecord, LiveGroup, LiveUser, OrgUnitRecord, ReconcilePlan,

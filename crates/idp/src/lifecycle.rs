@@ -216,6 +216,147 @@ pub fn stage_onboard(repo: &Path, req: &OnboardRequest) -> Result<Vec<PathBuf>, 
     Ok(touched)
 }
 
+/// Resolves `org_unit`, GAM-managed `groups`, `sku_id`, and `github_orgs` for `role_slug` from
+/// `directory/roles.yaml` + `directory/bundles.yaml` and calls [`stage_onboard`].
+pub fn stage_onboard_for_role(
+    repo: &Path,
+    email: &str,
+    given_name: &str,
+    family_name: &str,
+    role_slug: &str,
+    github_handle: Option<String>,
+    create: bool,
+) -> Result<Vec<PathBuf>, IdpError> {
+    let dir = repo.join("directory");
+    let roles_text = fs::read_to_string(dir.join("roles.yaml"))?;
+    let roles_doc: serde_yaml::Value = serde_yaml::from_str(&roles_text)?;
+
+    let role_val = if let Some(map) = roles_doc.get("roles").and_then(|v| v.as_mapping()) {
+        map.get(serde_yaml::Value::String(role_slug.to_string()))
+            .ok_or_else(|| {
+                IdpError::Validation(format!("unknown role {role_slug:?} in roles.yaml"))
+            })?
+    } else if let Some(seq) = roles_doc.get("roles").and_then(|v| v.as_sequence()) {
+        seq.iter()
+            .find(|r| r.get("id").and_then(|v| v.as_str()) == Some(role_slug))
+            .ok_or_else(|| {
+                IdpError::Validation(format!("unknown role {role_slug:?} in roles.yaml"))
+            })?
+    } else {
+        return Err(IdpError::Validation(
+            "roles.yaml: missing roles".to_string(),
+        ));
+    };
+
+    let org_unit = role_val
+        .get("ou")
+        .or_else(|| role_val.get("org_unit"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            IdpError::Validation(format!(
+                "role {role_slug} missing ou/org_unit in roles.yaml"
+            ))
+        })?
+        .to_string();
+
+    let bundles_path = dir.join("bundles.yaml");
+    let bundles_doc: Option<serde_yaml::Value> = if bundles_path.exists() {
+        Some(serde_yaml::from_str(&fs::read_to_string(&bundles_path)?)?)
+    } else {
+        None
+    };
+
+    let lookup_bundle = |bid: &str| -> Option<&serde_yaml::Value> {
+        let doc = bundles_doc.as_ref()?;
+        if let Some(map) = doc.get("bundles").and_then(|v| v.as_mapping()) {
+            map.get(serde_yaml::Value::String(bid.to_string()))
+        } else if let Some(seq) = doc.get("bundles").and_then(|v| v.as_sequence()) {
+            seq.iter()
+                .find(|b| b.get("id").and_then(|v| v.as_str()) == Some(bid))
+        } else {
+            None
+        }
+    };
+
+    let mut candidate_groups: Vec<String> = Vec::new();
+    let role_group = format!("role-{role_slug}@cerebral.work");
+    candidate_groups.push(role_group);
+
+    if let Some(gs) = role_val.get("groups").and_then(|v| v.as_sequence()) {
+        for g in gs {
+            if let Some(gs_str) = g.as_str()
+                && !candidate_groups.iter().any(|x| x == gs_str)
+            {
+                candidate_groups.push(gs_str.to_string());
+            }
+        }
+    }
+
+    let mut sku_id: Option<String> = match role_val.get("license") {
+        Some(serde_yaml::Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(serde_yaml::Value::Number(n)) => Some(n.to_string()),
+        _ => None,
+    };
+
+    let mut github_orgs: Vec<String> = Vec::new();
+
+    if let Some(bs) = role_val.get("bundles").and_then(|v| v.as_sequence()) {
+        for b in bs {
+            if let Some(bid) = b.as_str()
+                && let Some(bval) = lookup_bundle(bid)
+            {
+                if sku_id.is_none() {
+                    sku_id = match bval.get("license") {
+                        Some(serde_yaml::Value::String(s)) if !s.is_empty() => Some(s.clone()),
+                        Some(serde_yaml::Value::Number(n)) => Some(n.to_string()),
+                        _ => None,
+                    };
+                }
+                if let Some(ggs) = bval.get("google_groups").and_then(|v| v.as_sequence()) {
+                    for g in ggs {
+                        if let Some(gs_str) = g.as_str()
+                            && !candidate_groups.iter().any(|x| x == gs_str)
+                        {
+                            candidate_groups.push(gs_str.to_string());
+                        }
+                    }
+                }
+                if let Some(gh_map) = bval.get("github").and_then(|v| v.as_mapping()) {
+                    for (ok, _) in gh_map {
+                        if let Some(org_str) = ok.as_str()
+                            && !github_orgs.iter().any(|x| x == org_str)
+                        {
+                            github_orgs.push(org_str.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Filter candidate_groups to those that have a GAM-managed file in `directory/groups/<slug>.yaml`
+    let mut gam_groups = Vec::new();
+    for g in candidate_groups {
+        let slug = g.strip_suffix("@cerebral.work").unwrap_or(&g);
+        if dir.join("groups").join(format!("{slug}.yaml")).exists() {
+            gam_groups.push(g);
+        }
+    }
+
+    let req = OnboardRequest {
+        email: email.to_string(),
+        given_name: given_name.to_string(),
+        family_name: family_name.to_string(),
+        org_unit,
+        groups: gam_groups,
+        sku_id,
+        github_handle,
+        github_orgs,
+        create,
+    };
+    stage_onboard(repo, &req)
+}
+
 /// Stages an offboarding change for `email`.
 ///
 /// - When `finalize == false` (T0): sets `suspended: true` and `org_unit: /Suspended-Offboarding`
@@ -223,7 +364,7 @@ pub fn stage_onboard(repo: &Path, req: &OnboardRequest) -> Result<Vec<PathBuf>, 
 ///   files (killing group-derived access at T0 per `scripts/lifecycle/offboard.py`).
 /// - When `finalize == true` (T+30d): removes `email` from `directory/licenses.yaml` as well as groups.
 pub fn stage_offboard(repo: &Path, email: &str, finalize: bool) -> Result<Vec<PathBuf>, IdpError> {
-    if email.eq_ignore_ascii_case(idp_domain::reconciler::SOVEREIGN_ROOT_EMAIL) {
+    if idp_domain::principal::is_sovereign_root_email(email) {
         return Err(IdpError::Validation(format!(
             "SOVEREIGN ROOT PROTECTED: refusing to offboard {email}"
         )));
@@ -424,5 +565,7 @@ mod tests {
 
         let err = stage_offboard(root, "ctodie@cerebral.work", false).unwrap_err();
         assert!(err.to_string().contains("SOVEREIGN ROOT PROTECTED"));
+        let err_del = stage_offboard(root, "ahackley@cerebral.work", false).unwrap_err();
+        assert!(err_del.to_string().contains("SOVEREIGN ROOT PROTECTED"));
     }
 }

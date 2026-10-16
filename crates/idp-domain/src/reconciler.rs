@@ -17,6 +17,7 @@
 //!   matches the exact SHA-256 digest of the JSON-structured `{"serial": [...], "batch": [...]}`
 //!   command list with throwaway passwords redacted to `<random>`.
 
+use crate::principal::{is_sovereign_root_email, is_sovereign_root_github};
 use chrono::NaiveDate;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -28,13 +29,13 @@ use std::sync::LazyLock;
 static PASSWORD_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\bpassword \S+").expect("valid password regex"));
 
-/// Irrevocable Sovereign Root Google Workspace primary email address.
+/// Irrevocable Primary Sovereign Root Google Workspace primary email address.
 pub const SOVEREIGN_ROOT_EMAIL: &str = "ctodie@cerebral.work";
 
-/// Irrevocable Sovereign Root GitHub login handle (lowercase).
+/// Irrevocable Primary Sovereign Root GitHub login handle (lowercase).
 pub const SOVEREIGN_ROOT_GITHUB: &str = "todie";
 
-/// Irrevocable Sovereign Root organizational unit path.
+/// Irrevocable Sovereign Root organizational unit path (`/Humans/Admins`).
 pub const SOVEREIGN_ROOT_ORG_UNIT: &str = "/Humans/Admins";
 
 fn default_true() -> bool {
@@ -399,9 +400,7 @@ pub fn plan_users(
         };
 
         if h.org_unit != w.org_unit {
-            if email.eq_ignore_ascii_case(SOVEREIGN_ROOT_EMAIL)
-                && w.org_unit != SOVEREIGN_ROOT_ORG_UNIT
-            {
+            if is_sovereign_root_email(email) && w.org_unit != SOVEREIGN_ROOT_ORG_UNIT {
                 plan.manual.push(format!(
                     "SOVEREIGN ROOT PROTECTED {email} (refusing to move sovereign root out of {SOVEREIGN_ROOT_ORG_UNIT})"
                 ));
@@ -418,7 +417,7 @@ pub fn plan_users(
                 plan.manual.push(format!(
                     "NOT REINSTATED {email} (declared suspended: false, live is SUSPENDED — un-suspending is never automated; it is the offboarding-reversal path. Run `gam update user {email} suspended off` deliberately, or correct the row)"
                 ));
-            } else if email.eq_ignore_ascii_case(SOVEREIGN_ROOT_EMAIL) {
+            } else if is_sovereign_root_email(email) {
                 plan.manual.push(format!(
                     "SOVEREIGN ROOT PROTECTED {email} (refusing to suspend sovereign root)"
                 ));
@@ -485,7 +484,10 @@ pub fn plan_admin(
         };
         let want_role = effective_user_admin(w);
         let have_role = effective_live_admin(h);
-        if want_role == have_role {
+        if want_role == have_role
+            || (want_role == Some("delegated-sovereign")
+                && matches!(have_role, Some("delegated") | Some("super")))
+        {
             continue;
         }
         match (want_role, have_role) {
@@ -624,7 +626,7 @@ pub fn plan_groups(
                 if held.contains_key(member) {
                     continue;
                 }
-                if member.eq_ignore_ascii_case(SOVEREIGN_ROOT_EMAIL) {
+                if is_sovereign_root_email(member) {
                     plan.manual.push(format!(
                         "SOVEREIGN ROOT PROTECTED {member} in {email} (refusing to remove sovereign root from group)"
                     ));
@@ -681,7 +683,7 @@ pub fn plan_licenses(
             .push(format!("gam user {user} add license {sku}"));
     }
     for (user, sku) in have_set.difference(want) {
-        if user.eq_ignore_ascii_case(SOVEREIGN_ROOT_EMAIL) {
+        if is_sovereign_root_email(user) {
             plan.manual.push(format!(
                 "SOVEREIGN ROOT PROTECTED {user} (refusing to delete license {sku} from sovereign root)"
             ));
@@ -731,7 +733,7 @@ pub fn plan_github(
         };
 
         for login in h.difference(&w) {
-            if login.eq_ignore_ascii_case(SOVEREIGN_ROOT_GITHUB) {
+            if is_sovereign_root_github(login) {
                 plan.manual.push(format!(
                     "SOVEREIGN ROOT PROTECTED {login} in {org}{stake} (refusing to remove sovereign root from GitHub organization)"
                 ));
@@ -1034,29 +1036,39 @@ mod tests {
         let mut want_users = BTreeMap::new();
         let mut have_users = BTreeMap::new();
 
-        let mut u_root = sample_user("ctodie@cerebral.work");
-        u_root.org_unit = "/Suspended-Offboarding".to_string();
-        u_root.suspended = true;
-        let mut l_root = sample_live_user("ctodie@cerebral.work");
-        l_root.org_unit = "/Humans/Admins".to_string();
-        l_root.suspended = false;
-        want_users.insert(u_root.email.clone(), u_root);
-        have_users.insert(l_root.email.clone(), l_root.clone());
+        for email in ["ctodie@cerebral.work", "ahackley@cerebral.work"] {
+            let mut u_root = sample_user(email);
+            u_root.org_unit = "/Suspended-Offboarding".to_string();
+            u_root.suspended = true;
+            u_root.admin = Some(if email == "ctodie@cerebral.work" {
+                "super".to_string()
+            } else {
+                "delegated-sovereign".to_string()
+            });
+            let mut l_root = sample_live_user(email);
+            l_root.org_unit = "/Humans/Admins".to_string();
+            l_root.suspended = false;
+            l_root.admin = Some(if email == "ctodie@cerebral.work" {
+                "super".to_string()
+            } else {
+                "delegated".to_string()
+            });
+            want_users.insert(u_root.email.clone(), u_root);
+            have_users.insert(l_root.email.clone(), l_root);
+        }
 
-        let user_plan = plan_users(
-            &want_users,
-            &have_users,
-            Some("ahackley@cerebral.work"),
-            "pw",
-        );
+        let user_plan = plan_users(&want_users, &have_users, Some("bot@cerebral.work"), "pw");
         assert!(user_plan.batch.is_empty());
-        assert_eq!(user_plan.manual.len(), 2);
+        assert_eq!(user_plan.manual.len(), 4);
         assert!(
             user_plan
                 .manual
                 .iter()
-                .all(|m| m.starts_with("SOVEREIGN ROOT PROTECTED ctodie@cerebral.work"))
+                .all(|m| m.starts_with("SOVEREIGN ROOT PROTECTED "))
         );
+
+        let admin_plan = plan_admin(&want_users, &have_users, &BTreeMap::new());
+        assert!(admin_plan.manual.is_empty());
 
         let today = NaiveDate::from_ymd_opt(2026, 10, 14).unwrap();
         let mut want_groups = BTreeMap::new();
@@ -1084,7 +1096,10 @@ mod tests {
                 settings: BTreeMap::new(),
                 members: BTreeSet::new(),
                 managers: BTreeSet::new(),
-                owners: BTreeSet::from(["ctodie@cerebral.work".to_string()]),
+                owners: BTreeSet::from([
+                    "ctodie@cerebral.work".to_string(),
+                    "ahackley@cerebral.work".to_string(),
+                ]),
             },
         );
         let group_plan = plan_groups(
@@ -1103,13 +1118,22 @@ mod tests {
                 .iter()
                 .any(|m| m.starts_with("SOVEREIGN ROOT PROTECTED ctodie@cerebral.work"))
         );
+        assert!(
+            group_plan
+                .manual
+                .iter()
+                .any(|m| m.starts_with("SOVEREIGN ROOT PROTECTED ahackley@cerebral.work"))
+        );
 
         let lic_plan = plan_licenses(
             &BTreeSet::new(),
-            Some(&BTreeSet::from([(
-                "ctodie@cerebral.work".to_string(),
-                "1010020020".to_string(),
-            )])),
+            Some(&BTreeSet::from([
+                ("ctodie@cerebral.work".to_string(), "1010020020".to_string()),
+                (
+                    "ahackley@cerebral.work".to_string(),
+                    "1010020020".to_string(),
+                ),
+            ])),
         );
         assert!(lic_plan.batch.is_empty());
         assert!(
@@ -1118,18 +1142,24 @@ mod tests {
                 .iter()
                 .any(|m| m.starts_with("SOVEREIGN ROOT PROTECTED ctodie@cerebral.work"))
         );
+        assert!(
+            lic_plan
+                .manual
+                .iter()
+                .any(|m| m.starts_with("SOVEREIGN ROOT PROTECTED ahackley@cerebral.work"))
+        );
 
         let want_gh = BTreeMap::from([("cerebral-work".to_string(), BTreeSet::new())]);
         let have_gh = BTreeMap::from([(
             "cerebral-work".to_string(),
-            BTreeSet::from(["todie".to_string()]),
+            BTreeSet::from(["todie".to_string(), "lordvoid".to_string()]),
         )]);
         let (gh_plan, _) = plan_github(
             &want_gh,
             &have_gh,
-            &BTreeSet::from(["todie".to_string()]),
-            &BTreeSet::from(["todie".to_string()]),
-            Some("lordvoid"),
+            &BTreeSet::from(["todie".to_string(), "lordvoid".to_string()]),
+            &BTreeSet::from(["todie".to_string(), "lordvoid".to_string()]),
+            Some("bot"),
         );
         assert!(gh_plan.batch.is_empty());
         assert!(gh_plan.gh_batch.is_empty());
@@ -1138,6 +1168,12 @@ mod tests {
                 .manual
                 .iter()
                 .any(|m| m.starts_with("SOVEREIGN ROOT PROTECTED todie in cerebral-work"))
+        );
+        assert!(
+            gh_plan
+                .manual
+                .iter()
+                .any(|m| m.starts_with("SOVEREIGN ROOT PROTECTED lordvoid in cerebral-work"))
         );
     }
 }

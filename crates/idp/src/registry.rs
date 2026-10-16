@@ -139,7 +139,7 @@ pub const CONCLAVE_ELVES: &[ElfPersona] = &[
     },
 ];
 
-/// Extended estate Clockwork Elves (22 total: 16 core Conclave + 6 platform/memory/auth elves).
+/// All 22 canonical estate Clockwork Elves (16 core Conclave + 6 runtime/compiler/verification elves).
 pub const ALL_ESTATE_ELVES: &[ElfPersona] = &[
     ElfPersona {
         id: "sindri",
@@ -233,6 +233,48 @@ pub const ALL_ESTATE_ELVES: &[ElfPersona] = &[
         desc: "Accept-and-hold wake gateway and TCP ingress management",
     },
     ElfPersona {
+        id: "kvasir",
+        name: "Kvasir",
+        repo: "xtool",
+        role: "toolchain / build synthesis",
+        desc: "xwork/xtool build orchestration, hermetic compilation, and lint gates",
+    },
+    ElfPersona {
+        id: "alvis",
+        name: "Alvis",
+        repo: "idp",
+        role: "type & schema artisan",
+        desc: "Zero-I/O algebraic domain modeling, identity invariants, and schema validation",
+    },
+    ElfPersona {
+        id: "dvalin",
+        name: "Dvalin",
+        repo: "cas",
+        role: "runic storage & CAS",
+        desc: "Content-addressable storage, Merkle tree integrity, and delta snapshots",
+    },
+    ElfPersona {
+        id: "fjalar",
+        name: "Fjalar",
+        repo: "watch",
+        role: "alerting & watchtower",
+        desc: "Proactive anomaly detection, duty clock alerting, and watchtower probes",
+    },
+    ElfPersona {
+        id: "eikthyrnir",
+        name: "Eikthyrnir",
+        repo: "stream",
+        role: "telemetry & event fanout",
+        desc: "High-throughput telemetry routing, metric aggregation, and stream fanout",
+    },
+    ElfPersona {
+        id: "syn",
+        name: "Syn",
+        repo: "gate",
+        role: "admission denial guard",
+        desc: "Fail-closed admission control, boundary defense, and policy refusal",
+    },
+    ElfPersona {
         id: "forseti",
         name: "Forseti",
         repo: "k8",
@@ -253,62 +295,24 @@ pub const ALL_ESTATE_ELVES: &[ElfPersona] = &[
         role: "kernel security",
         desc: "Linux Landlock LSM, seccomp filters, and kernel link primitives",
     },
-    ElfPersona {
-        id: "njord",
-        name: "Njord",
-        repo: "ch",
-        role: "cache store",
-        desc: "Distributed artifact cache and CAS storage broker",
-    },
-    ElfPersona {
-        id: "norns",
-        name: "Norns",
-        repo: "mem",
-        role: "memory continuity",
-        desc: "Long-term observation graph and session handoff weaver",
-    },
-    ElfPersona {
-        id: "sol",
-        name: "Sol",
-        repo: "search",
-        role: "index & retrieval",
-        desc: "Hybrid lexical/vector search and corpus indexing",
-    },
-    ElfPersona {
-        id: "vidar",
-        name: "Vidar",
-        repo: "auth",
-        role: "identity & attestation",
-        desc: "Identity reconciliation, token brokering, and attestation verification",
-    },
-    ElfPersona {
-        id: "ratatoskr",
-        name: "Ratatoskr",
-        repo: "bus",
-        role: "mesh courier",
-        desc: "Inter-agent message routing and event transport",
-    },
-    ElfPersona {
-        id: "tyr",
-        name: "Tyr",
-        repo: "gate",
-        role: "policy enforcement",
-        desc: "Capability envelope enforcement and admission control",
-    },
 ];
 
-/// Looks up an elf persona by id across all 22 estate elves.
+/// Looks up an elf persona by id or GitHub handle across all 22 estate elves.
 pub fn find_elf(id: &str) -> Option<&'static ElfPersona> {
     let needle = id.trim().to_ascii_lowercase();
     let needle = needle.strip_suffix("-bot[bot]").unwrap_or(&needle);
     let needle = needle.strip_suffix("-bot").unwrap_or(needle);
+    let needle = needle.strip_suffix("-unsigned").unwrap_or(needle);
     ALL_ESTATE_ELVES.iter().find(|e| e.id == needle)
 }
 
 /// Returns true if the given GitHub login or actor handle belongs to a registered Clockwork Elf or runner bot.
 pub fn is_automation_login(login: &str) -> bool {
     let lower = login.trim().to_ascii_lowercase();
-    if lower == "runner-bot" || lower == "runner-bot[bot]" {
+    if matches!(
+        lower.as_str(),
+        "runner" | "runner-bot" | "runner-bot[bot]" | "unsigned-runner"
+    ) {
         return true;
     }
     find_elf(&lower).is_some()
@@ -352,11 +356,39 @@ impl KeyStore {
 
     /// Returns the path to the PEM private key for the given bot identifier.
     pub fn key_path(&self, bot_id: &str) -> PathBuf {
+        let candidate_unsigned = self.base_dir.join(format!("unsigned-{bot_id}-bot.pem"));
+        if candidate_unsigned.exists() {
+            return candidate_unsigned;
+        }
         let candidate_bot = self.base_dir.join(format!("{bot_id}-bot.pem"));
         if candidate_bot.exists() {
             return candidate_bot;
         }
         self.base_dir.join(format!("{bot_id}.pem"))
+    }
+
+    /// Creates canonical symlinks for bot keys and metadata if not already present.
+    pub fn link_canonical(&self, short_name: &str, app_name: &str) -> Result<(), IdpError> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let target_pem = format!("{app_name}.pem");
+            let target_json = format!("{app_name}.json");
+
+            let link_bot_pem = self.base_dir.join(format!("{short_name}-bot.pem"));
+            let link_pem = self.base_dir.join(format!("{short_name}.pem"));
+            let link_json = self.base_dir.join(format!("{short_name}.json"));
+
+            let _ = fs::remove_file(&link_bot_pem);
+            let _ = symlink(&target_pem, &link_bot_pem);
+
+            let _ = fs::remove_file(&link_pem);
+            let _ = symlink(&target_pem, &link_pem);
+
+            let _ = fs::remove_file(&link_json);
+            let _ = symlink(&target_json, &link_json);
+        }
+        Ok(())
     }
 
     /// Checks if a private key exists for the given bot identifier.

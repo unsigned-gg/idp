@@ -42,30 +42,34 @@ pub use detectors::{
     DeclaredAdmission, FORBIDDEN_APPPROJECT_KINDS, Grant, OIDC_PREFIX, Rbac, SubmissionPeer,
     WIDE_ROLES, admits_port, bound_groups, canonical_peer, describe_peer, evaluate_oidc_bindings,
     evaluate_reflexd_admission, evaluate_tenant_appprojects, expected_cloudflare_emails,
-    expected_tailscale_admins, load_declared_admission, oidc_grants, resolve_role,
-    submission_peers, wildcard_rules,
+    expected_tailscale_admins, load_declared_admission, missing_live_role_groups, oidc_grants,
+    resolve_role, submission_peers, wildcard_rules,
 };
 pub use directory::{
     DesiredState, GroupRecord, HeldException, LicenseRecord, OrgUnitRecord, UserRecord, hold_text,
-    load_desired_state, matrix_groups, missing_matrix_groups, split_header, unhold_text,
-    validate_directory_schema, validate_identity_models,
+    load_desired_state, matrix_groups, missing_matrix_groups, missing_role_groups, split_header,
+    unhold_text, validate_directory_schema, validate_identity_models,
 };
 pub use error::IdpError;
 pub use findings::{FindingItem, Findings, FindingsPayload, part};
 pub use hydra::{ClientAuth, OryHydraClient, OryHydraConfig, PrivateKeyJwtClaims};
-pub use lifecycle::{OnboardRequest, stage_offboard, stage_onboard};
+pub use lifecycle::{OnboardRequest, stage_offboard, stage_onboard, stage_onboard_for_role};
 pub use manifest::{AppManifest, ConversionResponse, HookAttributes};
 pub use planes::{
-    LiveGroupMember, all_declared, foundation_declared, gam_declared, undeclared_groups_report,
-    unmanaged_declared,
+    LiveGroupMember, all_declared, disjoint_planes_check, foundation_declared, gam_declared,
+    undeclared_groups_report, unmanaged_declared,
 };
 pub use presence::{
-    Presence, SlackMemberInput, declared_handles, evaluate_presence, parse_slack_members,
-    src_declared, translate_github_members,
+    Presence, SlackMemberInput, collect_presence, declared_handles, evaluate_presence,
+    parse_cloudflare_access_presence, parse_gitbook_presence, parse_keycloak_presence,
+    parse_linear_presence, parse_slack_members, parse_tailscale_presence, src_cloudflare_access,
+    src_declared, src_gitbook, src_keycloak, src_linear, src_tailscale, translate_github_members,
 };
 pub use principal::{
-    CapabilityEnvelope, GroupDecision, PROHIBITED_SENSITIVE_PATHS, Principal,
-    SOLE_SUPERADMIN_EMAIL, SOLE_SUPERADMIN_GITHUB, SubjectMatterMesh, reconcile_group_decisions,
+    CapabilityEnvelope, DELEGATED_SOVEREIGN_ROOT_EMAIL, DELEGATED_SOVEREIGN_ROOT_GITHUB,
+    GroupDecision, PROHIBITED_SENSITIVE_PATHS, Principal, SOLE_SUPERADMIN_EMAIL,
+    SOLE_SUPERADMIN_GITHUB, SubjectMatterMesh, is_sovereign_root_email, is_sovereign_root_github,
+    reconcile_group_decisions,
 };
 pub use reconcile::{
     LiveDirectoryState, LiveGroup, LiveUser, ReconcilePlan, apply_refusal, held_members,

@@ -173,6 +173,351 @@ pub fn parse_slack_members(entries: &[SlackMemberInput]) -> Presence {
     }
 }
 
+/// Parses a Keycloak Admin REST API `/admin/realms/{realm}/users` JSON array into a [`Presence`] snapshot.
+pub fn parse_keycloak_presence(
+    realm: &str,
+    users_json: &serde_json::Value,
+) -> Result<Presence, IdpError> {
+    let arr = users_json
+        .as_array()
+        .or_else(|| users_json.get("users").and_then(|v| v.as_array()))
+        .ok_or_else(|| IdpError::Validation("keycloak users JSON must be an array".to_string()))?;
+    let mut members = BTreeMap::new();
+    for u in arr {
+        let email = u
+            .get("email")
+            .and_then(|v| v.as_str())
+            .or_else(|| u.get("username").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        if email.is_empty() {
+            continue;
+        }
+        let enabled = u.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+        let state = if enabled { "active" } else { "disabled" };
+        members.insert(email, state.to_string());
+    }
+    Ok(Presence {
+        name: format!("keycloak:{realm}"),
+        members,
+        error: None,
+        skipped: None,
+        keyed_by: "email".to_string(),
+    })
+}
+
+/// Reads Keycloak presence from `KEYCLOAK_USERS_JSON` (inline JSON or file path), or marks skipped when unconfigured.
+pub fn src_keycloak(realm: &str) -> Presence {
+    read_json_env_presence(
+        &format!("keycloak:{realm}"),
+        "KEYCLOAK_USERS_JSON",
+        "not wired yet (KEYCLOAK_ADMIN_URL / KEYCLOAK_USERS_JSON unset)",
+        |val| parse_keycloak_presence(realm, val),
+    )
+}
+
+/// Parses a Tailscale `/api/v2/tailnet/{tailnet}/users` or `/devices` JSON payload into a [`Presence`] snapshot.
+pub fn parse_tailscale_presence(payload: &serde_json::Value) -> Result<Presence, IdpError> {
+    let mut members = BTreeMap::new();
+    if let Some(users) = payload
+        .get("users")
+        .and_then(|v| v.as_array())
+        .or_else(|| payload.as_array())
+    {
+        for u in users {
+            let login = u
+                .get("loginName")
+                .and_then(|v| v.as_str())
+                .or_else(|| u.get("user").and_then(|v| v.as_str()))
+                .or_else(|| u.get("email").and_then(|v| v.as_str()))
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
+            if login.is_empty() {
+                continue;
+            }
+            let status = u
+                .get("status")
+                .and_then(|v| v.as_str())
+                .or_else(|| u.get("role").and_then(|v| v.as_str()))
+                .unwrap_or("active")
+                .to_lowercase();
+            let state = if status == "suspended" {
+                "suspended".to_string()
+            } else {
+                status
+            };
+            members.insert(login, state);
+        }
+    } else if let Some(devices) = payload.get("devices").and_then(|v| v.as_array()) {
+        for d in devices {
+            let user = d
+                .get("user")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_lowercase();
+            if !user.is_empty() {
+                members.insert(user, "active".to_string());
+            }
+        }
+    } else {
+        return Err(IdpError::Validation(
+            "tailscale JSON must contain `users`, `devices`, or be a JSON array".to_string(),
+        ));
+    }
+    Ok(Presence {
+        name: "tailscale".to_string(),
+        members,
+        error: None,
+        skipped: None,
+        keyed_by: "email".to_string(),
+    })
+}
+
+/// Reads Tailscale presence from `TAILSCALE_USERS_JSON` (inline JSON or file path), or marks skipped when unconfigured.
+pub fn src_tailscale() -> Presence {
+    read_json_env_presence(
+        "tailscale",
+        "TAILSCALE_USERS_JSON",
+        "not wired yet (TAILSCALE_API_TOKEN / TAILSCALE_USERS_JSON unset)",
+        parse_tailscale_presence,
+    )
+}
+
+/// Parses a Linear GraphQL `{ users { nodes { email active admin guest } } }` or array payload into a [`Presence`] snapshot.
+pub fn parse_linear_presence(payload: &serde_json::Value) -> Result<Presence, IdpError> {
+    let nodes = payload
+        .pointer("/data/users/nodes")
+        .and_then(|v| v.as_array())
+        .or_else(|| payload.pointer("/users/nodes").and_then(|v| v.as_array()))
+        .or_else(|| payload.get("users").and_then(|v| v.as_array()))
+        .or_else(|| payload.as_array())
+        .ok_or_else(|| {
+            IdpError::Validation("linear JSON must contain user nodes or be an array".to_string())
+        })?;
+    let mut members = BTreeMap::new();
+    for u in nodes {
+        let email = u
+            .get("email")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        if email.is_empty() {
+            continue;
+        }
+        let active = u.get("active").and_then(|v| v.as_bool()).unwrap_or(true);
+        let admin = u.get("admin").and_then(|v| v.as_bool()).unwrap_or(false);
+        let guest = u.get("guest").and_then(|v| v.as_bool()).unwrap_or(false);
+        let state = if !active {
+            "suspended"
+        } else if admin {
+            "admin"
+        } else if guest {
+            "guest"
+        } else {
+            "member"
+        };
+        members.insert(email, state.to_string());
+    }
+    Ok(Presence {
+        name: "linear".to_string(),
+        members,
+        error: None,
+        skipped: None,
+        keyed_by: "email".to_string(),
+    })
+}
+
+/// Reads Linear presence from `LINEAR_USERS_JSON` (inline JSON or file path), or marks skipped when unconfigured.
+pub fn src_linear() -> Presence {
+    read_json_env_presence(
+        "linear",
+        "LINEAR_USERS_JSON",
+        "not wired yet (LINEAR_API_KEY / LINEAR_USERS_JSON unset)",
+        parse_linear_presence,
+    )
+}
+
+/// Parses a Cloudflare Zero Trust Access `/accounts/{id}/access/users` JSON payload into a [`Presence`] snapshot.
+pub fn parse_cloudflare_access_presence(payload: &serde_json::Value) -> Result<Presence, IdpError> {
+    let arr = payload
+        .get("result")
+        .and_then(|v| v.as_array())
+        .or_else(|| payload.get("users").and_then(|v| v.as_array()))
+        .or_else(|| payload.as_array())
+        .ok_or_else(|| {
+            IdpError::Validation(
+                "cloudflare-access JSON must contain `result`, `users`, or be an array".to_string(),
+            )
+        })?;
+    let mut members = BTreeMap::new();
+    for u in arr {
+        let email = u
+            .get("email")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        if email.is_empty() {
+            continue;
+        }
+        let seat = u
+            .get("access_seat")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let state = if seat { "active" } else { "inactive" };
+        members.insert(email, state.to_string());
+    }
+    Ok(Presence {
+        name: "cloudflare-access".to_string(),
+        members,
+        error: None,
+        skipped: None,
+        keyed_by: "email".to_string(),
+    })
+}
+
+/// Reads Cloudflare Access presence from `CLOUDFLARE_ACCESS_USERS_JSON` (inline JSON or file path), or marks skipped when unconfigured.
+pub fn src_cloudflare_access() -> Presence {
+    read_json_env_presence(
+        "cloudflare-access",
+        "CLOUDFLARE_ACCESS_USERS_JSON",
+        "not wired yet (CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCESS_USERS_JSON unset)",
+        parse_cloudflare_access_presence,
+    )
+}
+
+/// Parses a GitBook `/v1/orgs/{org}/members` JSON payload into a [`Presence`] snapshot.
+pub fn parse_gitbook_presence(payload: &serde_json::Value) -> Result<Presence, IdpError> {
+    let arr = payload
+        .get("items")
+        .and_then(|v| v.as_array())
+        .or_else(|| payload.get("members").and_then(|v| v.as_array()))
+        .or_else(|| payload.as_array())
+        .ok_or_else(|| {
+            IdpError::Validation(
+                "gitbook JSON must contain `items`, `members`, or be an array".to_string(),
+            )
+        })?;
+    let mut members = BTreeMap::new();
+    for m in arr {
+        let user_obj = m.get("user").unwrap_or(m);
+        let email = user_obj
+            .get("email")
+            .and_then(|v| v.as_str())
+            .or_else(|| m.get("email").and_then(|v| v.as_str()))
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        if email.is_empty() {
+            continue;
+        }
+        let role = m
+            .get("role")
+            .and_then(|v| v.as_str())
+            .unwrap_or("member")
+            .to_lowercase();
+        members.insert(email, role);
+    }
+    Ok(Presence {
+        name: "gitbook".to_string(),
+        members,
+        error: None,
+        skipped: None,
+        keyed_by: "email".to_string(),
+    })
+}
+
+/// Reads GitBook presence from `GITBOOK_MEMBERS_JSON` (inline JSON or file path), or marks skipped when unconfigured.
+pub fn src_gitbook() -> Presence {
+    read_json_env_presence(
+        "gitbook",
+        "GITBOOK_MEMBERS_JSON",
+        "not wired yet (GITBOOK_API_TOKEN / GITBOOK_MEMBERS_JSON unset)",
+        parse_gitbook_presence,
+    )
+}
+
+fn read_json_env_presence<F>(name: &str, env_var: &str, skip_msg: &str, parser: F) -> Presence
+where
+    F: FnOnce(&serde_json::Value) -> Result<Presence, IdpError>,
+{
+    let raw = match std::env::var(env_var) {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => {
+            return Presence {
+                name: name.to_string(),
+                members: BTreeMap::new(),
+                error: None,
+                skipped: Some(skip_msg.to_string()),
+                keyed_by: "email".to_string(),
+            };
+        }
+    };
+    let text = if Path::new(raw.trim()).exists() {
+        match fs::read_to_string(raw.trim()) {
+            Ok(t) => t,
+            Err(e) => {
+                return Presence {
+                    name: name.to_string(),
+                    members: BTreeMap::new(),
+                    error: Some(e.to_string()),
+                    skipped: None,
+                    keyed_by: "email".to_string(),
+                };
+            }
+        }
+    } else {
+        raw
+    };
+    match serde_json::from_str::<serde_json::Value>(&text)
+        .and_then(|v| parser(&v).map_err(serde::de::Error::custom))
+    {
+        Ok(p) => p,
+        Err(e) => Presence {
+            name: name.to_string(),
+            members: BTreeMap::new(),
+            error: Some(e.to_string()),
+            skipped: None,
+            keyed_by: "email".to_string(),
+        },
+    }
+}
+
+/// Collects presence snapshots across declared `users.yaml` and all configured/stubbed planes,
+/// optionally filtered to a single plane name (`keycloak`, `tailscale`, `linear`, `cloudflare-access`, `gitbook`).
+pub fn collect_presence(
+    repo: &Path,
+    plane_filter: Option<&str>,
+) -> Result<Vec<Presence>, IdpError> {
+    let mut results = vec![src_declared(repo)?];
+    let want = |name: &str| -> bool {
+        match plane_filter {
+            None => true,
+            Some(f) => f == name || name.starts_with(&format!("{f}:")),
+        }
+    };
+    if want("keycloak") {
+        results.push(src_keycloak("cerebral"));
+    }
+    if want("tailscale") {
+        results.push(src_tailscale());
+    }
+    if want("linear") {
+        results.push(src_linear());
+    }
+    if want("cloudflare-access") {
+        results.push(src_cloudflare_access());
+    }
+    if want("gitbook") {
+        results.push(src_gitbook());
+    }
+    Ok(results)
+}
+
 /// Evaluates cross-system [`Presence`] snapshots, producing the human report lines,
 /// structured [`Findings`], and exit code (`0` = clean, `1` = source error, `2` = findings).
 pub fn evaluate_presence(results: &[Presence]) -> (i32, Vec<String>, Findings) {
@@ -607,5 +952,79 @@ mod tests {
         assert!(joined.contains("UNCLAIMED in github:cerebral-work"));
         assert!(f.items.iter().any(|i| i.kind == "leftover"));
         assert!(f.items.iter().any(|i| i.kind == "unclaimed-github"));
+    }
+
+    #[test]
+    fn test_parse_five_planes_presence() {
+        let kc_val = serde_json::json!([
+            {"email": "ctodie@cerebral.work", "enabled": true},
+            {"email": "gone@cerebral.work", "enabled": false}
+        ]);
+        let kc = parse_keycloak_presence("cerebral", &kc_val).unwrap();
+        assert_eq!(kc.name, "keycloak:cerebral");
+        assert_eq!(
+            kc.members.get("ctodie@cerebral.work").map(|s| s.as_str()),
+            Some("active")
+        );
+        assert_eq!(
+            kc.members.get("gone@cerebral.work").map(|s| s.as_str()),
+            Some("disabled")
+        );
+
+        let ts_val = serde_json::json!({
+            "users": [
+                {"loginName": "ctodie@cerebral.work", "status": "active"},
+                {"loginName": "ahackley@cerebral.work", "status": "admin"}
+            ]
+        });
+        let ts = parse_tailscale_presence(&ts_val).unwrap();
+        assert_eq!(ts.name, "tailscale");
+        assert_eq!(
+            ts.members.get("ahackley@cerebral.work").map(|s| s.as_str()),
+            Some("admin")
+        );
+
+        let lin_val = serde_json::json!({
+            "data": {
+                "users": {
+                    "nodes": [
+                        {"email": "ctodie@cerebral.work", "active": true, "admin": true},
+                        {"email": "gone@cerebral.work", "active": false}
+                    ]
+                }
+            }
+        });
+        let lin = parse_linear_presence(&lin_val).unwrap();
+        assert_eq!(lin.name, "linear");
+        assert_eq!(
+            lin.members.get("ctodie@cerebral.work").map(|s| s.as_str()),
+            Some("admin")
+        );
+        assert_eq!(
+            lin.members.get("gone@cerebral.work").map(|s| s.as_str()),
+            Some("suspended")
+        );
+
+        let cf_val = serde_json::json!({
+            "result": [
+                {"email": "ctodie@cerebral.work", "access_seat": true},
+                {"email": "ahackley@cerebral.work", "access_seat": true}
+            ]
+        });
+        let cf = parse_cloudflare_access_presence(&cf_val).unwrap();
+        assert_eq!(cf.name, "cloudflare-access");
+        assert_eq!(cf.members.len(), 2);
+
+        let gb_val = serde_json::json!({
+            "items": [
+                {"user": {"email": "ctodie@cerebral.work"}, "role": "admin"}
+            ]
+        });
+        let gb = parse_gitbook_presence(&gb_val).unwrap();
+        assert_eq!(gb.name, "gitbook");
+        assert_eq!(
+            gb.members.get("ctodie@cerebral.work").map(|s| s.as_str()),
+            Some("admin")
+        );
     }
 }

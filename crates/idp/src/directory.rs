@@ -7,8 +7,11 @@
 //! `test_reconcile.py`, `test_identity_models.py`, and `scripts/lifecycle/_yamlio.py`.
 
 use crate::error::IdpError;
-use crate::planes::{all_declared, unmanaged_declared};
-use crate::principal::{SOLE_SUPERADMIN_EMAIL, SOLE_SUPERADMIN_GITHUB};
+use crate::planes::{all_declared, disjoint_planes_check, unmanaged_declared};
+use crate::principal::{
+    DELEGATED_SOVEREIGN_ROOT_EMAIL, DELEGATED_SOVEREIGN_ROOT_GITHUB, SOLE_SUPERADMIN_EMAIL,
+    SOLE_SUPERADMIN_GITHUB, is_sovereign_root_email,
+};
 use crate::registry::is_automation_login;
 use chrono::NaiveDate;
 use regex::Regex;
@@ -290,7 +293,7 @@ pub fn load_desired_state(repo: &Path) -> Result<DesiredState, IdpError> {
     })
 }
 
-/// Recursively extracts every `<slug>@cerebral.work` group address referenced in `role-matrix.yaml`.
+/// Recursively extracts every `<slug>@cerebral.work` group address referenced in a YAML document.
 pub fn matrix_groups(node: &serde_yaml::Value) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     match node {
@@ -312,25 +315,48 @@ pub fn matrix_groups(node: &serde_yaml::Value) -> BTreeSet<String> {
     out
 }
 
-/// Returns any `<slug>@cerebral.work` group referenced in `directory/role-matrix.yaml`
-/// that is missing from `all_declared(repo)` (`directory/groups/*.yaml` ∪ `terraform/groups/main.tf`).
-pub fn missing_matrix_groups(repo: &Path) -> Result<BTreeSet<String>, IdpError> {
-    let matrix_path = repo.join("directory/role-matrix.yaml");
-    let text = fs::read_to_string(&matrix_path)?;
-    let doc: serde_yaml::Value = serde_yaml::from_str(&text)?;
-    let referenced = matrix_groups(&doc);
+/// Returns any `<slug>@cerebral.work` group referenced in `directory/roles.yaml`,
+/// `directory/bundles.yaml`, or `directory/role-matrix.yaml` (if present) that is missing from
+/// `all_declared(repo)` (`directory/groups/*.yaml` ∪ `terraform/groups/main.tf`).
+pub fn missing_role_groups(repo: &Path) -> Result<BTreeSet<String>, IdpError> {
+    let dir = repo.join("directory");
+    let mut referenced = BTreeSet::new();
+    let mut found_any = false;
+    for filename in ["role-matrix.yaml", "roles.yaml", "bundles.yaml"] {
+        let p = dir.join(filename);
+        if p.exists() {
+            found_any = true;
+            let text = fs::read_to_string(&p)?;
+            let doc: serde_yaml::Value = serde_yaml::from_str(&text)?;
+            referenced.extend(matrix_groups(&doc));
+        }
+    }
+    if !found_any {
+        return Err(IdpError::Validation(
+            "missing directory/roles.yaml, directory/bundles.yaml, or directory/role-matrix.yaml"
+                .to_string(),
+        ));
+    }
     let declared = all_declared(repo)?;
     Ok(referenced.difference(&declared).cloned().collect())
+}
+
+/// Alias for [`missing_role_groups`] preserved for backwards compatibility.
+pub fn missing_matrix_groups(repo: &Path) -> Result<BTreeSet<String>, IdpError> {
+    missing_role_groups(repo)
 }
 
 /// Validates `directory/` desired-state referential integrity and schema invariants:
 /// - Unique emails and unique `github_handle`s in `directory/users.yaml`
 /// - Every user's `org_unit` exists in `directory/orgunits.yaml` (or `"/"`)
-/// - `admin` (if set) is in `{"super", "delegated"}` and `super` / `is_super_admin` is restricted to `ctodie@cerebral.work`
+/// - `admin` (if set) is in `{"super", "delegated", "delegated-sovereign"}`
+/// - `super` / `is_super_admin` is restricted to `ctodie@cerebral.work` and `delegated-sovereign` to `ahackley@cerebral.work`
+/// - Sovereign roots (`ctodie@cerebral.work`, `ahackley@cerebral.work`) are never `suspended: true` and reside in `/Humans/Admins` when declared
 /// - Every `groups/<stem>.yaml` matches `email` prefix `<stem>@`
 /// - Every `unreconciled_members` entry has a non-empty `reason` and valid ISO `until` date
 /// - Every user in `directory/licenses.yaml` exists in `directory/users.yaml`
 /// - `directory/groups-unmanaged.yaml` has no overlap with declared groups
+/// - GAM-managed groups (`directory/groups/*.yaml`) and Terraform foundation groups (`terraform/groups/main.tf`) are strictly disjoint
 ///
 /// Returns the number of declared users on success.
 pub fn validate_directory_schema(repo: &Path) -> Result<usize, IdpError> {
@@ -380,15 +406,36 @@ pub fn validate_directory_schema(repo: &Path) -> Result<usize, IdpError> {
         if let Some(ref adm) = u.admin
             && adm != "super"
             && adm != "delegated"
+            && adm != "delegated-sovereign"
         {
             return Err(IdpError::Validation(format!(
                 "{email}: invalid admin level '{adm}'"
             )));
         }
-        if u.is_super_admin && email != SOLE_SUPERADMIN_EMAIL {
+        if u.is_super_admin && !is_sovereign_root_email(email) {
             return Err(IdpError::Validation(format!(
-                "{email}: super admin is restricted exclusively to {SOLE_SUPERADMIN_EMAIL}"
+                "{email}: super admin is restricted exclusively to sovereign roots ({SOLE_SUPERADMIN_EMAIL} and {DELEGATED_SOVEREIGN_ROOT_EMAIL})"
             )));
+        }
+        if u.admin.as_deref() == Some("delegated-sovereign")
+            && !email.eq_ignore_ascii_case(DELEGATED_SOVEREIGN_ROOT_EMAIL)
+        {
+            return Err(IdpError::Validation(format!(
+                "{email}: delegated-sovereign admin is restricted exclusively to {DELEGATED_SOVEREIGN_ROOT_EMAIL}"
+            )));
+        }
+        if is_sovereign_root_email(email) {
+            if u.suspended {
+                return Err(IdpError::Validation(format!(
+                    "SOVEREIGN ROOT PROTECTED: {email} cannot be suspended in users.yaml"
+                )));
+            }
+            if state.orgunits.contains("/Humans/Admins") && u.org_unit != "/Humans/Admins" {
+                return Err(IdpError::Validation(format!(
+                    "SOVEREIGN ROOT PROTECTED: {email} must remain in /Humans/Admins, found {}",
+                    u.org_unit
+                )));
+            }
         }
     }
 
@@ -464,11 +511,18 @@ pub fn validate_directory_schema(repo: &Path) -> Result<usize, IdpError> {
         }
     }
 
-    if dir.join("role-matrix.yaml").exists() {
-        let missing_groups = missing_matrix_groups(repo)?;
+    if repo.join("terraform/groups/main.tf").exists() {
+        disjoint_planes_check(repo)?;
+    }
+
+    if dir.join("role-matrix.yaml").exists()
+        || dir.join("roles.yaml").exists()
+        || dir.join("bundles.yaml").exists()
+    {
+        let missing_groups = missing_role_groups(repo)?;
         if !missing_groups.is_empty() {
             return Err(IdpError::Validation(format!(
-                "role-matrix.yaml references groups not declared in GAM or foundation: {missing_groups:?}"
+                "role/bundle definitions reference groups not declared in GAM or foundation: {missing_groups:?}"
             )));
         }
     }
@@ -476,9 +530,9 @@ pub fn validate_directory_schema(repo: &Path) -> Result<usize, IdpError> {
     Ok(state.users.len())
 }
 
-/// Validates `roles.yaml`, `bundles.yaml`, `policies.yaml`, and `role-matrix.yaml` invariants,
-/// including the single-superadmin rule (`ctodie@cerebral.work` / `todie`) and Clockwork Elf
-/// automation constraints.
+/// Validates `roles.yaml`, `bundles.yaml`, `policies.yaml`, and optional `role-matrix.yaml` invariants,
+/// including the sovereign root rules (`ctodie@cerebral.work` / `todie` and `ahackley@cerebral.work` / `LordVoid`)
+/// and Clockwork Elf automation constraints.
 pub fn validate_identity_models(repo: &Path) -> Result<(), IdpError> {
     let dir = repo.join("directory");
     let roles_doc: serde_yaml::Value =
@@ -487,8 +541,12 @@ pub fn validate_identity_models(repo: &Path) -> Result<(), IdpError> {
         serde_yaml::from_str(&fs::read_to_string(dir.join("bundles.yaml"))?)?;
     let policies_doc: serde_yaml::Value =
         serde_yaml::from_str(&fs::read_to_string(dir.join("policies.yaml"))?)?;
-    let matrix_doc: serde_yaml::Value =
-        serde_yaml::from_str(&fs::read_to_string(dir.join("role-matrix.yaml"))?)?;
+    let matrix_path = dir.join("role-matrix.yaml");
+    let matrix_doc: Option<serde_yaml::Value> = if matrix_path.exists() {
+        Some(serde_yaml::from_str(&fs::read_to_string(&matrix_path)?)?)
+    } else {
+        None
+    };
 
     let state = load_desired_state(repo)?;
     let declared_groups = all_declared(repo)?;
@@ -519,9 +577,20 @@ pub fn validate_identity_models(repo: &Path) -> Result<(), IdpError> {
             }
         }
     } else if let Some(map) = bundles_doc.get("bundles").and_then(|v| v.as_mapping()) {
-        for (bk, _) in map {
-            if let Some(s) = bk.as_str() {
-                bundle_ids.insert(s.to_string());
+        for (bk, bv) in map {
+            if let Some(bid) = bk.as_str() {
+                bundle_ids.insert(bid.to_string());
+                if let Some(ggs) = bv.get("google_groups").and_then(|v| v.as_sequence()) {
+                    for g in ggs {
+                        if let Some(gs) = g.as_str()
+                            && !declared_groups.contains(gs)
+                        {
+                            return Err(IdpError::Validation(format!(
+                                "bundle {bid} references undeclared google_group {gs}"
+                            )));
+                        }
+                    }
+                }
             }
         }
     } else {
@@ -541,36 +610,13 @@ pub fn validate_identity_models(repo: &Path) -> Result<(), IdpError> {
             if !role_ids.insert(rid.to_string()) {
                 return Err(IdpError::Validation(format!("duplicate role id {rid}")));
             }
-            if let Some(priv_str) = r.get("privacy").and_then(|v| v.as_str())
-                && !["internal", "tenant", "external"].contains(&priv_str)
-            {
-                return Err(IdpError::Validation(format!(
-                    "role {rid}: invalid privacy {priv_str}"
-                )));
-            }
-            if let Some(ou_str) = r.get("ou").and_then(|v| v.as_str())
-                && !valid_ous.contains(ou_str)
-            {
-                return Err(IdpError::Validation(format!(
-                    "role {rid}: unknown ou {ou_str}"
-                )));
-            }
-            if let Some(bs) = r.get("bundles").and_then(|v| v.as_sequence()) {
-                for b in bs {
-                    if let Some(bs_str) = b.as_str()
-                        && !bundle_ids.contains(bs_str)
-                    {
-                        return Err(IdpError::Validation(format!(
-                            "role {rid} references unknown bundle {bs_str}"
-                        )));
-                    }
-                }
-            }
+            validate_role_entry(rid, r, &valid_ous, &bundle_ids, &declared_groups)?;
         }
     } else if let Some(map) = roles_doc.get("roles").and_then(|v| v.as_mapping()) {
-        for (k, _) in map {
-            if let Some(s) = k.as_str() {
-                role_ids.insert(s.to_string());
+        for (k, rv) in map {
+            if let Some(rid) = k.as_str() {
+                role_ids.insert(rid.to_string());
+                validate_role_entry(rid, rv, &valid_ous, &bundle_ids, &declared_groups)?;
             }
         }
     } else {
@@ -597,52 +643,25 @@ pub fn validate_identity_models(repo: &Path) -> Result<(), IdpError> {
         }
     }
 
-    // 3. Check policies.yaml access_policies
+    // 3. Check policies.yaml (both `access_policies` sequence and `policies` mapping/sequence)
     if let Some(pols) = policies_doc
         .get("access_policies")
         .and_then(|v| v.as_sequence())
     {
         for p in pols {
             let pid = p.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-            if let Some(b) = p.get("bundle").and_then(|v| v.as_str())
-                && !bundle_ids.contains(b)
-            {
-                return Err(IdpError::Validation(format!(
-                    "policy {pid}: unknown bundle {b}"
-                )));
-            }
-            for field in ["auto_assign", "requestable_by"] {
-                if let Some(r_in) = p
-                    .get(field)
-                    .and_then(|v| v.get("role_in"))
-                    .and_then(|v| v.as_sequence())
-                {
-                    for r in r_in {
-                        if let Some(rs) = r.as_str()
-                            && !role_ids.contains(rs)
-                        {
-                            return Err(IdpError::Validation(format!(
-                                "policy {pid} ({field}): unknown role {rs}"
-                            )));
-                        }
-                    }
-                }
-            }
-            if let Some(apps) = p.get("approvers").and_then(|v| v.as_sequence()) {
-                for a in apps {
-                    if let Some(u_in) = a.get("user_in").and_then(|v| v.as_sequence()) {
-                        for u in u_in {
-                            if let Some(us) = u.as_str()
-                                && !state.users.contains_key(us)
-                            {
-                                return Err(IdpError::Validation(format!(
-                                    "policy {pid}: unknown approver {us}"
-                                )));
-                            }
-                        }
-                    }
-                }
-            }
+            validate_policy_entry(pid, p, &bundle_ids, &role_ids, &state.users)?;
+        }
+    }
+    if let Some(pols_map) = policies_doc.get("policies").and_then(|v| v.as_mapping()) {
+        for (pk, pv) in pols_map {
+            let pid = pk.as_str().unwrap_or("?");
+            validate_policy_entry(pid, pv, &bundle_ids, &role_ids, &state.users)?;
+        }
+    } else if let Some(pols_seq) = policies_doc.get("policies").and_then(|v| v.as_sequence()) {
+        for p in pols_seq {
+            let pid = p.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+            validate_policy_entry(pid, p, &bundle_ids, &role_ids, &state.users)?;
         }
     }
 
@@ -663,28 +682,55 @@ pub fn validate_identity_models(repo: &Path) -> Result<(), IdpError> {
         }
     }
 
-    // Check role-matrix.yaml break_glass_principals
-    if let Some(bg) = matrix_doc
-        .get("break_glass_principals")
-        .and_then(|v| v.as_sequence())
+    // Check policies.yaml delegated_sovereign_root invariant if present
+    if let Some(del_root) = policies_doc
+        .get("invariants")
+        .and_then(|v| v.get("delegated_sovereign_root"))
     {
-        if bg.len() != 1 {
+        let email = del_root.get("email").and_then(|v| v.as_str()).unwrap_or("");
+        let gh = del_root
+            .get("github_handle")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !email.eq_ignore_ascii_case(DELEGATED_SOVEREIGN_ROOT_EMAIL)
+            || !gh.eq_ignore_ascii_case(DELEGATED_SOVEREIGN_ROOT_GITHUB)
+        {
             return Err(IdpError::Validation(format!(
-                "role-matrix.yaml break_glass_principals must have exactly 1 entry, found {}",
-                bg.len()
-            )));
-        }
-        let email = bg[0].get("email").and_then(|v| v.as_str()).unwrap_or("");
-        if email != SOLE_SUPERADMIN_EMAIL {
-            return Err(IdpError::Validation(format!(
-                "role-matrix.yaml break_glass_principals must be {SOLE_SUPERADMIN_EMAIL}, found {email}"
+                "policies.yaml delegated_sovereign_root must be {DELEGATED_SOVEREIGN_ROOT_EMAIL} ({DELEGATED_SOVEREIGN_ROOT_GITHUB})"
             )));
         }
     }
 
-    // Verify no Clockwork Elf appears in users.yaml
+    // Check break_glass_principals in policies.yaml and/or role-matrix.yaml
+    for (doc_name, doc_opt) in [
+        ("policies.yaml", Some(&policies_doc)),
+        ("role-matrix.yaml", matrix_doc.as_ref()),
+    ] {
+        if let Some(bg) = doc_opt
+            .and_then(|d| d.get("break_glass_principals"))
+            .and_then(|v| v.as_sequence())
+        {
+            if bg.is_empty() || bg.len() > 2 {
+                return Err(IdpError::Validation(format!(
+                    "{doc_name} break_glass_principals must have 1 or 2 sovereign root entries, found {}",
+                    bg.len()
+                )));
+            }
+            for entry in bg {
+                let email = entry.get("email").and_then(|v| v.as_str()).unwrap_or("");
+                if !is_sovereign_root_email(email) {
+                    return Err(IdpError::Validation(format!(
+                        "{doc_name} break_glass_principals entry must be a sovereign root ({SOLE_SUPERADMIN_EMAIL} or {DELEGATED_SOVEREIGN_ROOT_EMAIL}), found {email}"
+                    )));
+                }
+            }
+        }
+    }
+
+    // Verify no Clockwork Elf appears in users.yaml outside /Service Accounts
     for (email, u) in &state.users {
-        if let Some(ref gh) = u.github_handle
+        if u.org_unit != "/Service Accounts"
+            && let Some(ref gh) = u.github_handle
             && is_automation_login(gh)
         {
             return Err(IdpError::Validation(format!(
@@ -693,6 +739,118 @@ pub fn validate_identity_models(repo: &Path) -> Result<(), IdpError> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_role_entry(
+    rid: &str,
+    r: &serde_yaml::Value,
+    valid_ous: &BTreeSet<String>,
+    bundle_ids: &BTreeSet<String>,
+    declared_groups: &BTreeSet<String>,
+) -> Result<(), IdpError> {
+    if let Some(priv_str) = r.get("privacy").and_then(|v| v.as_str())
+        && !["internal", "tenant", "external"].contains(&priv_str)
+    {
+        return Err(IdpError::Validation(format!(
+            "role {rid}: invalid privacy {priv_str}"
+        )));
+    }
+    if let Some(ou_str) = r
+        .get("ou")
+        .or_else(|| r.get("org_unit"))
+        .and_then(|v| v.as_str())
+        && !valid_ous.contains(ou_str)
+    {
+        return Err(IdpError::Validation(format!(
+            "role {rid}: unknown ou {ou_str}"
+        )));
+    }
+    if let Some(bs) = r.get("bundles").and_then(|v| v.as_sequence()) {
+        for b in bs {
+            if let Some(bs_str) = b.as_str()
+                && !bundle_ids.contains(bs_str)
+            {
+                return Err(IdpError::Validation(format!(
+                    "role {rid} references unknown bundle {bs_str}"
+                )));
+            }
+        }
+    }
+    if let Some(gs) = r.get("groups").and_then(|v| v.as_sequence()) {
+        for g in gs {
+            if let Some(gs_str) = g.as_str()
+                && !declared_groups.contains(gs_str)
+            {
+                return Err(IdpError::Validation(format!(
+                    "role {rid} references undeclared group {gs_str}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_policy_entry(
+    pid: &str,
+    p: &serde_yaml::Value,
+    bundle_ids: &BTreeSet<String>,
+    role_ids: &BTreeSet<String>,
+    users: &BTreeMap<String, UserRecord>,
+) -> Result<(), IdpError> {
+    if let Some(b) = p.get("bundle").and_then(|v| v.as_str())
+        && !bundle_ids.contains(b)
+    {
+        return Err(IdpError::Validation(format!(
+            "policy {pid}: unknown bundle {b}"
+        )));
+    }
+    for field in ["auto_assign", "requestable_by"] {
+        if let Some(r_in) = p
+            .get(field)
+            .and_then(|v| v.get("role_in"))
+            .and_then(|v| v.as_sequence())
+        {
+            for r in r_in {
+                if let Some(rs) = r.as_str()
+                    && !role_ids.contains(rs)
+                {
+                    return Err(IdpError::Validation(format!(
+                        "policy {pid} ({field}): unknown role {rs}"
+                    )));
+                }
+            }
+        }
+    }
+    if let Some(apps_seq) = p.get("approvers").and_then(|v| v.as_sequence()) {
+        for a in apps_seq {
+            if let Some(u_in) = a.get("user_in").and_then(|v| v.as_sequence()) {
+                for u in u_in {
+                    if let Some(us) = u.as_str()
+                        && !users.contains_key(us)
+                    {
+                        return Err(IdpError::Validation(format!(
+                            "policy {pid}: unknown approver {us}"
+                        )));
+                    }
+                }
+            }
+        }
+    } else if let Some(u_in) = p
+        .get("approvers")
+        .and_then(|v| v.get("user_in"))
+        .and_then(|v| v.as_sequence())
+    {
+        for u in u_in {
+            if let Some(us) = u.as_str()
+                && !users.contains_key(us)
+            {
+                return Err(IdpError::Validation(format!(
+                    "policy {pid}: unknown approver {us}"
+                )));
+            }
+        }
+    }
     Ok(())
 }
 

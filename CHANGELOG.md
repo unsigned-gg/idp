@@ -22,4 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `projectfile.yaml`, `rust-toolchain.toml` (`1.88.0`), and `.cargo/config.toml` (`xtask`, `xwork`, `xtool` aliases with `-j 2`).
 - Added Ory Hydra Dynamic Client Registration (RFC 7591 / RFC 7592), OAuth 2.0 Token Exchange (RFC 8693), Token Introspection (RFC 7662), and IETF `draft-klrc-aiagent-auth-03` WIMSE/SPIFFE Agent Identity adapter (`idp_domain::dcr`, `idp::hydra::OryHydraClient`, and `idp dcr` CLI subcommand).
 - Added `GET /dcr/metadata/{bot}`, `GET /.well-known/jwks/{bot}`, and `POST /dcr/register` routes to `idp manifest serve` (`idp-cli`) with deterministic mesh inference (`mesh_for_bot`) and keystore-backed registration receipt persistence.
-
+- Added co-protected Sovereign Root (`ctodie@cerebral.work` / `todie` and `ahackley@cerebral.work` / `LordVoid`) lockout guards across `idp-domain` (`principal`, `reconciler`) and `idp` (`directory`).
+- Unified role, bundle, and policy schema validation (`roles.yaml` + `bundles.yaml` + `policies.yaml`), retiring legacy `role-matrix.yaml` and enforcing disjoint group declaration planes (`gam_declared ∩ foundation_declared == ∅`).
+- Added live presence parsers and HTTP probes for `keycloak`, `tailscale`, `linear`, `cloudflare-access`, and `gitbook` (`idp presence`), plus `detect_tenant_appprojects` and `idp reconcile role-matrix-live`.
+- Added in-cluster `GET /healthz`, `GET /readyz`, `POST /internal/group-decisions`, and `POST /oauth2/token-exchange` routes to `idp-cli` server.

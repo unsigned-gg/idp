@@ -14,12 +14,14 @@
 //! - Non-superadmin subjects can never obtain `Principal::Superuser` via token introspection,
 //!   even if the token scope string contains `"estate:superuser"`.
 
-use crate::principal::{Principal, SOLE_SUPERADMIN_EMAIL, SubjectMatterMesh};
+use crate::principal::{
+    Principal, SOLE_SUPERADMIN_EMAIL, SubjectMatterMesh, is_sovereign_root_email,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-/// Scope token required (alongside `SOLE_SUPERADMIN_EMAIL`) to resolve `Principal::Superuser`.
+/// Scope token required (alongside a Sovereign Root `sub`) to resolve `Principal::Superuser`.
 pub const ESTATE_SUPERUSER_SCOPE: &str = "estate:superuser";
 
 /// OAuth 2.0 Grant Type URI for Token Exchange (RFC 8693).
@@ -1052,11 +1054,7 @@ impl IntrospectedOAuth2Token {
             .collect();
 
         if scopes.contains(ESTATE_SUPERUSER_SCOPE) {
-            if self
-                .sub
-                .as_deref()
-                .is_some_and(|s| s.eq_ignore_ascii_case(SOLE_SUPERADMIN_EMAIL))
-            {
+            if self.sub.as_deref().is_some_and(is_sovereign_root_email) {
                 return Principal::Superuser;
             }
             return Principal::Denied;

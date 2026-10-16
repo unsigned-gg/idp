@@ -17,12 +17,13 @@ use idp::directory::{
     hold_text, load_desired_state, unhold_text, validate_directory_schema, validate_identity_models,
 };
 use idp::hydra::{OryHydraClient, OryHydraConfig};
-use idp::lifecycle::{OnboardRequest, stage_offboard, stage_onboard};
+use idp::lifecycle::{OnboardRequest, stage_offboard, stage_onboard, stage_onboard_for_role};
 use idp::manifest::AppManifest;
 use idp::planes::{
     LiveGroupMember, all_declared, foundation_declared, gam_declared, undeclared_groups_report,
     unmanaged_declared,
 };
+use idp::presence::{collect_presence, evaluate_presence};
 use idp::reconcile::{
     LiveDirectoryState, apply_refusal, plan_digest, plan_findings, reconcile_directory, redact,
 };
@@ -49,13 +50,32 @@ enum Commands {
     /// GitHub App manifest operations
     Manifest(ManifestArgs),
 
+    /// Launch in-cluster or local HTTP daemon (`/healthz`, `/readyz`, `/internal/group-decisions`, `/oauth2/token-exchange`, DCR, JWKS)
+    Serve {
+        /// Socket address to bind
+        #[arg(long, default_value = "0.0.0.0:8080")]
+        bind: SocketAddr,
+
+        /// Explicit public base URL
+        #[arg(long)]
+        public_url: Option<String>,
+
+        /// WIMSE/SPIFFE trust domain for Conclave Elf identities
+        #[arg(long, default_value = "estate.cerebral.work")]
+        trust_domain: String,
+
+        /// Optional Ory Hydra Public API base URL for `/dcr/register`
+        #[arg(long)]
+        hydra_url: Option<String>,
+    },
+
     /// Token brokering and JWT minting
     Token(TokenArgs),
 
     /// List Conclave bot identities and host registration status
     Bot(BotArgs),
 
-    /// Validate declarative identity directory (`users.yaml`, `groups/*.yaml`, `role-matrix.yaml`, `policies.yaml`)
+    /// Validate declarative identity directory (`users.yaml`, `groups/*.yaml`, `roles.yaml`, `bundles.yaml`, `policies.yaml`)
     Validate {
         /// Path to the identity repository root
         #[arg(long, default_value = ".")]
@@ -71,6 +91,21 @@ enum Commands {
         /// Plane to print (`all`, `gam`, `foundation`, `unmanaged`)
         #[arg(long, default_value = "all")]
         plane: String,
+    },
+
+    /// Evaluate cross-system identity presence across declared and live planes
+    Presence {
+        /// Path to the identity repository root
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+
+        /// Optional plane filter (`keycloak`, `tailscale`, `linear`, `cloudflare-access`, `gitbook`)
+        #[arg(long)]
+        plane: Option<String>,
+
+        /// Emit JSON findings payload instead of human table
+        #[arg(long)]
+        json: bool,
     },
 
     /// Reconciliation plan digest and hold/unhold operations
@@ -247,6 +282,9 @@ enum LifecycleCommands {
         given_name: String,
         /// Family (last) name
         family_name: String,
+        /// Optional canonical role slug from `directory/roles.yaml` (e.g. `operator`, `engineer`, `contractor`)
+        #[arg(long)]
+        role: Option<String>,
         /// Google Workspace organizational unit path
         #[arg(long, default_value = "/Engineering")]
         org_unit: String,
@@ -421,6 +459,24 @@ async fn main() -> Result<()> {
     let key_store = KeyStore::default();
 
     match cli.command {
+        Commands::Serve {
+            bind,
+            public_url,
+            trust_domain,
+            hydra_url,
+        } => {
+            let public_url = public_url.unwrap_or_else(|| format!("http://{bind}"));
+            let state = Arc::new(AppState {
+                public_url,
+                key_store,
+                trust_domain,
+                hydra_public_url: hydra_url,
+            });
+            let app = create_router(state);
+            info!("Listening on http://{bind}");
+            let listener = tokio::net::TcpListener::bind(bind).await?;
+            axum::serve(listener, app).await?;
+        }
         Commands::Manifest(args) => match args.command {
             ManifestCommands::Generate { bot, redirect_url } => {
                 let manifest = AppManifest::for_conclave_bot(&bot, &redirect_url);
@@ -556,6 +612,19 @@ async fn main() -> Result<()> {
             }
             other => bail!("unknown plane '{other}' (expected all, gam, foundation, or unmanaged)"),
         },
+        Commands::Presence { repo, plane, json } => {
+            let snapshots = collect_presence(&repo, plane.as_deref())?;
+            let (rc, lines, findings) = evaluate_presence(&snapshots);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&findings.payload())?);
+            } else {
+                for line in lines {
+                    println!("{line}");
+                }
+            }
+            findings.write_to_env()?;
+            std::process::exit(rc);
+        }
         Commands::Reconcile(args) => match args.command {
             ReconcileCommands::Plan {
                 repo,
@@ -656,6 +725,7 @@ async fn main() -> Result<()> {
                 email,
                 given_name,
                 family_name,
+                role,
                 org_unit,
                 groups,
                 sku_id,
@@ -664,34 +734,46 @@ async fn main() -> Result<()> {
                 github_orgs,
                 no_create,
             } => {
-                let group_list: Vec<String> = groups
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                let gh_orgs = if let Some(ref csv) = github_orgs {
-                    csv.split(',')
+                let touched = if let Some(role_slug) = role {
+                    stage_onboard_for_role(
+                        &repo,
+                        &email,
+                        &given_name,
+                        &family_name,
+                        &role_slug,
+                        github,
+                        !no_create,
+                    )?
+                } else {
+                    let group_list: Vec<String> = groups
+                        .split(',')
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty())
-                        .collect()
-                } else if github.is_some() {
-                    let state = load_desired_state(&repo)?;
-                    state.github_orgs.keys().cloned().collect()
-                } else {
-                    Vec::new()
+                        .collect();
+                    let gh_orgs = if let Some(ref csv) = github_orgs {
+                        csv.split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    } else if github.is_some() {
+                        let state = load_desired_state(&repo)?;
+                        state.github_orgs.keys().cloned().collect()
+                    } else {
+                        Vec::new()
+                    };
+                    let req = OnboardRequest {
+                        email,
+                        given_name,
+                        family_name,
+                        org_unit,
+                        groups: group_list,
+                        sku_id: if no_license { None } else { Some(sku_id) },
+                        github_handle: github,
+                        github_orgs: gh_orgs,
+                        create: !no_create,
+                    };
+                    stage_onboard(&repo, &req)?
                 };
-                let req = OnboardRequest {
-                    email,
-                    given_name,
-                    family_name,
-                    org_unit,
-                    groups: group_list,
-                    sku_id: if no_license { None } else { Some(sku_id) },
-                    github_handle: github,
-                    github_orgs: gh_orgs,
-                    create: !no_create,
-                };
-                let touched = stage_onboard(&repo, &req)?;
                 println!("Staged onboarding changes in:");
                 for p in touched {
                     println!("  {}", p.display());

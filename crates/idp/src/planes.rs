@@ -91,6 +91,19 @@ pub fn all_declared(repo: &Path) -> Result<BTreeSet<String>, IdpError> {
     Ok(all)
 }
 
+/// Enforces the strict disjoint plane invariant (`gam_declared ∩ foundation_declared == ∅`).
+pub fn disjoint_planes_check(repo: &Path) -> Result<(), IdpError> {
+    let gam = gam_declared(repo)?;
+    let foundation = foundation_declared(repo)?;
+    let overlap: Vec<String> = gam.intersection(&foundation).cloned().collect();
+    if !overlap.is_empty() {
+        return Err(IdpError::Validation(format!(
+            "groups declared on BOTH GAM (directory/groups/) and foundation (terraform/groups/main.tf) planes: {overlap:?}"
+        )));
+    }
+    Ok(())
+}
+
 /// Reads `directory/groups-unmanaged.yaml` (or the given path) and returns `{email: reason}`
 /// for entries with a non-empty `email` and non-whitespace `reason`.
 pub fn unmanaged_declared(path: &Path) -> Result<BTreeMap<String, String>, IdpError> {

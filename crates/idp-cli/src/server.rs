@@ -74,15 +74,117 @@ pub struct PublicJwkSet {
     pub keys: Vec<PublicJwkDescriptor>,
 }
 
-/// Constructs the Axum router for the minting and DCR server.
+/// Request payload for `POST /internal/group-decisions` consumed by `keycloak-extensions`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GroupDecisionsRequest {
+    /// Subject email address.
+    pub email: String,
+    /// Optional declared admin tier (`"super"`, `"delegated-sovereign"`, `"delegated"`, `"none"`).
+    #[serde(default)]
+    pub admin_tier: Option<String>,
+    /// Live group memberships observed in Keycloak / IdP.
+    #[serde(default)]
+    pub candidate_groups: Vec<String>,
+    /// Declarative target group memberships.
+    #[serde(default)]
+    pub declared_groups: Vec<String>,
+    /// Optional managed groups (defaults to union of `candidate_groups` and `declared_groups`).
+    #[serde(default)]
+    pub managed_groups: Vec<String>,
+    /// Optional protected admin groups requiring Sovereign Root authorization.
+    #[serde(default)]
+    pub protected_admin_groups: Vec<String>,
+}
+
+/// Constructs the Axum router for the minting, DCR, token-exchange, and internal policy server.
 pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index_handler))
+        .route("/healthz", get(healthz_handler))
+        .route("/readyz", get(readyz_handler))
         .route("/callback", get(callback_handler))
         .route("/dcr/metadata/{bot}", get(dcr_metadata_handler))
         .route("/dcr/register", post(dcr_register_handler))
+        .route("/internal/group-decisions", post(group_decisions_handler))
+        .route("/oauth2/token-exchange", post(token_exchange_handler))
         .route("/.well-known/jwks/{bot}", get(jwks_handler))
         .with_state(state)
+}
+
+async fn healthz_handler() -> Response {
+    (StatusCode::OK, Json(serde_json::json!({ "status": "ok" }))).into_response()
+}
+
+async fn readyz_handler() -> Response {
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "status": "ready" })),
+    )
+        .into_response()
+}
+
+async fn group_decisions_handler(Json(req): Json<GroupDecisionsRequest>) -> Response {
+    let principal = idp::principal::Principal::for_admin_tier(
+        &req.email,
+        false,
+        req.admin_tier.as_deref(),
+        std::collections::BTreeSet::new(),
+    );
+    let is_sovereign = idp::principal::is_sovereign_root_email(&req.email)
+        && principal == idp::principal::Principal::Superuser;
+    let live: std::collections::BTreeSet<String> = req.candidate_groups.into_iter().collect();
+    let mut desired: std::collections::BTreeSet<String> = req.declared_groups.into_iter().collect();
+    if is_sovereign {
+        // Sovereign root lockout guard: never strip live group memberships from a Sovereign Root.
+        for g in &live {
+            desired.insert(g.clone());
+        }
+    }
+    let managed: std::collections::BTreeSet<String> = if req.managed_groups.is_empty() {
+        desired.union(&live).cloned().collect()
+    } else {
+        req.managed_groups.into_iter().collect()
+    };
+    let protected: std::collections::BTreeSet<String> =
+        req.protected_admin_groups.into_iter().collect();
+    let decisions = idp::principal::reconcile_group_decisions(
+        &desired,
+        &live,
+        &managed,
+        &protected,
+        is_sovereign,
+    );
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "email": req.email,
+            "sovereign_root_protected": is_sovereign,
+            "decisions": decisions,
+        })),
+    )
+        .into_response()
+}
+
+async fn token_exchange_handler(Json(req): Json<idp::dcr::TokenExchangeRequest>) -> Response {
+    if let Err(err) = req.validate() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(idp::dcr::Rfc7591ErrorResponse::from(err)),
+        )
+            .into_response();
+    }
+    let resp = idp::dcr::OAuth2TokenResponse {
+        access_token: "<issued-by-upstream-hydra>".to_string(),
+        token_type: "Bearer".to_string(),
+        expires_in: Some(3600),
+        refresh_token: None,
+        scope: req.scope.clone(),
+        issued_token_type: Some(
+            req.requested_token_type
+                .unwrap_or_else(|| idp::dcr::TOKEN_TYPE_ACCESS_TOKEN.to_string()),
+        ),
+    };
+    (StatusCode::OK, Json(resp)).into_response()
 }
 
 /// Handler for the root dashboard showing the 16 Conclave bots.
@@ -414,6 +516,15 @@ async fn callback_handler(
     // Save JSON metadata
     let json_text = serde_json::to_string_pretty(&payload).unwrap_or_default();
     let _ = state.key_store.write_metadata(&payload.name, &json_text);
+
+    // Auto-link canonical symlinks if name follows `unsigned-<bot>-bot` pattern
+    if let Some(short_name) = payload
+        .name
+        .strip_prefix("unsigned-")
+        .and_then(|s| s.strip_suffix("-bot"))
+    {
+        let _ = state.key_store.link_canonical(short_name, &payload.name);
+    }
 
     let key_path = state.key_store.key_path(&payload.name);
 
@@ -833,5 +944,86 @@ mod tests {
         assert!(!persisted_raw.contains("super-secret-do-not-persist"));
         assert!(!persisted_raw.contains("rat-secret-token"));
         assert!(persisted_raw.contains("hydra-elf-sindri-001"));
+    }
+
+    #[tokio::test]
+    async fn test_in_cluster_service_endpoints_health_decisions_and_token_exchange() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let store = KeyStore::new(temp.path());
+        store.ensure_dir().expect("ensure_dir");
+
+        let state = Arc::new(AppState {
+            public_url: "http://idp.identity.svc.cluster.local:8080".to_string(),
+            key_store: store,
+            trust_domain: "estate.cerebral.work".to_string(),
+            hydra_public_url: None,
+        });
+
+        let base_url = spawn_test_server(state).await;
+        let http = reqwest::Client::new();
+
+        // /healthz and /readyz
+        let hz = http
+            .get(format!("{base_url}/healthz"))
+            .send()
+            .await
+            .expect("healthz");
+        assert_eq!(hz.status(), StatusCode::OK);
+        let rz = http
+            .get(format!("{base_url}/readyz"))
+            .send()
+            .await
+            .expect("readyz");
+        assert_eq!(rz.status(), StatusCode::OK);
+
+        // /internal/group-decisions protects Delegated Sovereign Root from removal
+        let gd = http
+            .post(format!("{base_url}/internal/group-decisions"))
+            .json(&GroupDecisionsRequest {
+                email: "ahackley@cerebral.work".to_string(),
+                admin_tier: Some("delegated-sovereign".to_string()),
+                candidate_groups: vec!["gcp-organization-admins@cerebral.work".to_string()],
+                declared_groups: vec![],
+                managed_groups: vec!["gcp-organization-admins@cerebral.work".to_string()],
+                protected_admin_groups: vec!["gcp-organization-admins@cerebral.work".to_string()],
+            })
+            .send()
+            .await
+            .expect("group decisions");
+        assert_eq!(gd.status(), StatusCode::OK);
+        let gd_json: serde_json::Value = gd.json().await.expect("gd json");
+        assert_eq!(gd_json["sovereign_root_protected"], true);
+        assert_eq!(
+            gd_json["decisions"]["gcp-organization-admins@cerebral.work"],
+            "keep"
+        );
+
+        // /oauth2/token-exchange positive & negative controls
+        let bad_tx = http
+            .post(format!("{base_url}/oauth2/token-exchange"))
+            .json(&serde_json::json!({
+                "subject_token": "tok-123",
+                "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                "actor_token": "act-456"
+            }))
+            .send()
+            .await
+            .expect("bad token exchange");
+        assert_eq!(bad_tx.status(), StatusCode::BAD_REQUEST);
+
+        let ok_tx = http
+            .post(format!("{base_url}/oauth2/token-exchange"))
+            .json(&serde_json::json!({
+                "subject_token": "tok-123",
+                "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                "actor_token": "act-456",
+                "actor_token_type": "urn:ietf:params:oauth:token-type:jwt",
+                "scope": "openid estate:agent:execute",
+                "audience": ["https://api.cerebral.work"]
+            }))
+            .send()
+            .await
+            .expect("ok token exchange");
+        assert_eq!(ok_tx.status(), StatusCode::OK);
     }
 }

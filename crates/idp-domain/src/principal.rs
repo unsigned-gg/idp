@@ -9,15 +9,38 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Sole human superadmin email across all estate control planes.
+/// Primary Sovereign Root human superadmin email across all estate control planes.
 pub const SOLE_SUPERADMIN_EMAIL: &str = "ctodie@cerebral.work";
 
-/// Sole human superadmin GitHub login across all estate organizations.
+/// Primary Sovereign Root human superadmin GitHub login across all estate organizations.
 pub const SOLE_SUPERADMIN_GITHUB: &str = "todie";
+
+/// Delegated Sovereign Root co-custodian email across estate control planes.
+pub const DELEGATED_SOVEREIGN_ROOT_EMAIL: &str = "ahackley@cerebral.work";
+
+/// Delegated Sovereign Root co-custodian GitHub login (lowercase for case-insensitive matching).
+pub const DELEGATED_SOVEREIGN_ROOT_GITHUB: &str = "lordvoid";
+
+/// Returns true if `email` is either the Primary Sovereign Root (`ctodie@cerebral.work`)
+/// or the Delegated Sovereign Root (`ahackley@cerebral.work`).
+pub fn is_sovereign_root_email(email: &str) -> bool {
+    let trimmed = email.trim();
+    trimmed.eq_ignore_ascii_case(SOLE_SUPERADMIN_EMAIL)
+        || trimmed.eq_ignore_ascii_case(DELEGATED_SOVEREIGN_ROOT_EMAIL)
+}
+
+/// Returns true if `login` is either the Primary Sovereign Root (`todie`)
+/// or the Delegated Sovereign Root (`lordvoid`).
+pub fn is_sovereign_root_github(login: &str) -> bool {
+    let trimmed = login.trim();
+    trimmed.eq_ignore_ascii_case(SOLE_SUPERADMIN_GITHUB)
+        || trimmed.eq_ignore_ascii_case(DELEGATED_SOVEREIGN_ROOT_GITHUB)
+}
 
 /// Paths in `cerebral-work/identity` that Clockwork Elves are never permitted to modify.
 pub const PROHIBITED_SENSITIVE_PATHS: &[&str] = &[
     "directory/roles.yaml",
+    "directory/bundles.yaml",
     "directory/policies.yaml",
     "directory/role-matrix.yaml",
     "terraform/org-admins/",
@@ -39,15 +62,16 @@ pub enum Principal {
         /// Allowed scope identifiers (sorted set of groups, repos, or mesh tags).
         scopes: BTreeSet<String>,
     },
-    /// Break-glass operator superadmin (`ctodie@cerebral.work` / `todie` only).
+    /// Sovereign Root / Delegated Sovereign Root (`ctodie@cerebral.work` / `ahackley@cerebral.work` only).
     Superuser,
 }
 
 impl Principal {
     /// Resolves a human user record into a `Principal` tier.
     ///
-    /// Enforces the single-superadmin invariant: only `ctodie@cerebral.work` can hold `Superuser`
-    /// when `is_super_admin` is true; any other user claiming `is_super_admin` is rejected (`Denied`).
+    /// Enforces the sovereign-root invariant: only `ctodie@cerebral.work` (Primary Sovereign Root)
+    /// and `ahackley@cerebral.work` (Delegated Sovereign Root) can hold `Superuser` when
+    /// `is_super_admin` is true; any other user claiming `is_super_admin` is rejected (`Denied`).
     pub fn for_human(
         email: &str,
         suspended: bool,
@@ -58,7 +82,7 @@ impl Principal {
             return Self::Denied;
         }
         if is_super_admin {
-            if email.eq_ignore_ascii_case(SOLE_SUPERADMIN_EMAIL) {
+            if is_sovereign_root_email(email) {
                 return Self::Superuser;
             }
             return Self::Denied;
@@ -67,6 +91,45 @@ impl Principal {
             Self::Unscoped
         } else {
             Self::Scoped { scopes }
+        }
+    }
+
+    /// Resolves a human user record with an explicit `admin` tier string (`"super"`, `"delegated-sovereign"`, or `"delegated"`).
+    pub fn for_admin_tier(
+        email: &str,
+        suspended: bool,
+        admin_tier: Option<&str>,
+        scopes: BTreeSet<String>,
+    ) -> Self {
+        if suspended {
+            return Self::Denied;
+        }
+        match admin_tier.map(str::trim).filter(|s| !s.is_empty()) {
+            Some("super") => {
+                if email.trim().eq_ignore_ascii_case(SOLE_SUPERADMIN_EMAIL) {
+                    Self::Superuser
+                } else {
+                    Self::Denied
+                }
+            }
+            Some("delegated-sovereign") => {
+                if email
+                    .trim()
+                    .eq_ignore_ascii_case(DELEGATED_SOVEREIGN_ROOT_EMAIL)
+                {
+                    Self::Superuser
+                } else {
+                    Self::Denied
+                }
+            }
+            Some("delegated") | None => {
+                if scopes.is_empty() {
+                    Self::Unscoped
+                } else {
+                    Self::Scoped { scopes }
+                }
+            }
+            Some(_) => Self::Denied,
         }
     }
 
@@ -187,7 +250,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_principal_ordering_and_sole_superadmin() {
+    fn test_principal_ordering_and_sovereign_roots() {
         let scopes = BTreeSet::from(["gcp-developers".to_string()]);
         let denied = Principal::Denied;
         let unscoped = Principal::Unscoped;
@@ -200,14 +263,45 @@ mod tests {
         assert!(unscoped < scoped);
         assert!(scoped < superuser);
 
-        // Sole superadmin check
+        // Sovereign Root and Delegated Sovereign Root checks
         assert_eq!(
             Principal::for_human("ctodie@cerebral.work", false, true, BTreeSet::new()),
             Principal::Superuser
         );
         assert_eq!(
-            Principal::for_human("ahackley@cerebral.work", false, true, scopes),
+            Principal::for_human("ahackley@cerebral.work", false, true, BTreeSet::new()),
+            Principal::Superuser
+        );
+        assert_eq!(
+            Principal::for_human("intruder@cerebral.work", false, true, scopes.clone()),
             Principal::Denied
+        );
+        assert_eq!(
+            Principal::for_admin_tier(
+                "ahackley@cerebral.work",
+                false,
+                Some("delegated-sovereign"),
+                BTreeSet::new()
+            ),
+            Principal::Superuser
+        );
+        assert_eq!(
+            Principal::for_admin_tier(
+                "ahackley@cerebral.work",
+                false,
+                Some("super"),
+                BTreeSet::new()
+            ),
+            Principal::Denied
+        );
+        assert_eq!(
+            Principal::for_admin_tier(
+                "ctodie@cerebral.work",
+                false,
+                Some("super"),
+                BTreeSet::new()
+            ),
+            Principal::Superuser
         );
     }
 

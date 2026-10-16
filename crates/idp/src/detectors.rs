@@ -893,23 +893,93 @@ pub fn evaluate_reflexd_admission(
 // role_matrix_live helpers
 // ---------------------------------------------------------------------------
 
-/// Expands `directory/role-matrix.yaml` and `directory/` to compute the set of active user
-/// emails expected to exist in Cloudflare (`super_administrators` ∪ `domain_administrators`).
+/// Verifies that every `<slug>@cerebral.work` group referenced in `roles.yaml`, `bundles.yaml`,
+/// or `role-matrix.yaml` exists in the live Google Workspace directory (`live_group_emails`).
+///
+/// Fails closed if `live_group_emails` is empty (`Err(IdpError::Validation)`).
+pub fn missing_live_role_groups(
+    repo: &Path,
+    live_group_emails: &BTreeSet<String>,
+) -> Result<Vec<String>, IdpError> {
+    if live_group_emails.is_empty() {
+        return Err(IdpError::Validation(
+            "the directory returned no groups at all; refusing to call that a clean read"
+                .to_string(),
+        ));
+    }
+    let dir = repo.join("directory");
+    let mut wanted = BTreeSet::new();
+    for filename in ["role-matrix.yaml", "roles.yaml", "bundles.yaml"] {
+        let p = dir.join(filename);
+        if p.exists() {
+            let text = fs::read_to_string(&p)?;
+            let doc: serde_yaml::Value = serde_yaml::from_str(&text)?;
+            for g in crate::directory::matrix_groups(&doc) {
+                wanted.insert(g.to_lowercase());
+            }
+        }
+    }
+    if wanted.is_empty() {
+        return Err(IdpError::Validation(
+            "role/bundle definitions named no groups at all".to_string(),
+        ));
+    }
+    let live_lower: BTreeSet<String> = live_group_emails
+        .iter()
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if live_lower.is_empty() {
+        return Err(IdpError::Validation(
+            "the directory returned no groups at all; refusing to call that a clean read"
+                .to_string(),
+        ));
+    }
+    Ok(wanted.difference(&live_lower).cloned().collect())
+}
+
+/// Expands `directory/bundles.yaml` (or legacy `directory/role-matrix.yaml`) and `directory/`
+/// to compute the set of active user emails expected to hold Cloudflare super/domain administrator access.
 pub fn expected_cloudflare_emails(repo: &Path) -> Result<BTreeSet<String>, IdpError> {
     let state = load_desired_state(repo)?;
-    let text = fs::read_to_string(repo.join("directory/role-matrix.yaml"))?;
-    let doc: serde_yaml::Value = serde_yaml::from_str(&text)?;
     let mut group_emails = BTreeSet::new();
-    if let Some(cf) = doc.get("cloudflare") {
-        for tier in ["super_administrators", "domain_administrators"] {
-            if let Some(seq) = cf
-                .get(tier)
-                .and_then(|t| t.get("groups"))
-                .and_then(|v| v.as_sequence())
-            {
-                for g in seq {
-                    if let Some(gs) = g.as_str() {
-                        group_emails.insert(gs.to_string());
+    let matrix_path = repo.join("directory/role-matrix.yaml");
+    if matrix_path.exists() {
+        let text = fs::read_to_string(&matrix_path)?;
+        let doc: serde_yaml::Value = serde_yaml::from_str(&text)?;
+        if let Some(cf) = doc.get("cloudflare") {
+            for tier in ["super_administrators", "domain_administrators"] {
+                if let Some(seq) = cf
+                    .get(tier)
+                    .and_then(|t| t.get("groups"))
+                    .and_then(|v| v.as_sequence())
+                {
+                    for g in seq {
+                        if let Some(gs) = g.as_str() {
+                            group_emails.insert(gs.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let bundles_path = repo.join("directory/bundles.yaml");
+    if group_emails.is_empty() && bundles_path.exists() {
+        let text = fs::read_to_string(&bundles_path)?;
+        let doc: serde_yaml::Value = serde_yaml::from_str(&text)?;
+        if let Some(bundles_map) = doc.get("bundles").and_then(|v| v.as_mapping()) {
+            for (_, bv) in bundles_map {
+                let is_cf_admin = bv
+                    .get("cloudflare_access")
+                    .and_then(|v| v.as_sequence())
+                    .is_some_and(|seq| seq.iter().any(|x| x.as_str() == Some("*")));
+                if is_cf_admin
+                    && let Some(ggs) = bv.get("google_groups").and_then(|v| v.as_sequence())
+                {
+                    for g in ggs {
+                        if let Some(gs) = g.as_str() {
+                            group_emails.insert(gs.to_string());
+                        }
                     }
                 }
             }
@@ -918,22 +988,47 @@ pub fn expected_cloudflare_emails(repo: &Path) -> Result<BTreeSet<String>, IdpEr
     expand_active_group_members(&state, &group_emails)
 }
 
-/// Expands `directory/role-matrix.yaml` and `directory/` to compute the set of active user
-/// emails expected to hold `Role::Admin` in Tailscale.
+/// Expands `directory/bundles.yaml` (or legacy `directory/role-matrix.yaml`) and `directory/`
+/// to compute the set of active user emails expected to hold `Role::Admin` / `group:operators` in Tailscale.
 pub fn expected_tailscale_admins(repo: &Path) -> Result<BTreeSet<String>, IdpError> {
     let state = load_desired_state(repo)?;
-    let text = fs::read_to_string(repo.join("directory/role-matrix.yaml"))?;
-    let doc: serde_yaml::Value = serde_yaml::from_str(&text)?;
     let mut group_emails = BTreeSet::new();
-    if let Some(seq) = doc
-        .get("tailscale")
-        .and_then(|t| t.get("Role::Admin"))
-        .and_then(|r| r.get("groups"))
-        .and_then(|v| v.as_sequence())
-    {
-        for g in seq {
-            if let Some(gs) = g.as_str() {
-                group_emails.insert(gs.to_string());
+    let matrix_path = repo.join("directory/role-matrix.yaml");
+    if matrix_path.exists() {
+        let text = fs::read_to_string(&matrix_path)?;
+        let doc: serde_yaml::Value = serde_yaml::from_str(&text)?;
+        if let Some(seq) = doc
+            .get("tailscale")
+            .and_then(|t| t.get("Role::Admin"))
+            .and_then(|r| r.get("groups"))
+            .and_then(|v| v.as_sequence())
+        {
+            for g in seq {
+                if let Some(gs) = g.as_str() {
+                    group_emails.insert(gs.to_string());
+                }
+            }
+        }
+    }
+    let bundles_path = repo.join("directory/bundles.yaml");
+    if group_emails.is_empty() && bundles_path.exists() {
+        let text = fs::read_to_string(&bundles_path)?;
+        let doc: serde_yaml::Value = serde_yaml::from_str(&text)?;
+        if let Some(bundles_map) = doc.get("bundles").and_then(|v| v.as_mapping()) {
+            for (_, bv) in bundles_map {
+                let is_ts_admin = bv
+                    .get("tailscale")
+                    .and_then(|v| v.as_sequence())
+                    .is_some_and(|seq| seq.iter().any(|x| x.as_str() == Some("group:operators")));
+                if is_ts_admin
+                    && let Some(ggs) = bv.get("google_groups").and_then(|v| v.as_sequence())
+                {
+                    for g in ggs {
+                        if let Some(gs) = g.as_str() {
+                            group_emails.insert(gs.to_string());
+                        }
+                    }
+                }
             }
         }
     }

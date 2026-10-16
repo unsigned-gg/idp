@@ -55,8 +55,18 @@ impl AppManifest {
             "issue_comment".to_string(),
         ];
 
+        let name = if bot_name.starts_with("unsigned-") {
+            if bot_name.ends_with("-bot") {
+                bot_name.to_string()
+            } else {
+                format!("{bot_name}-bot")
+            }
+        } else {
+            format!("unsigned-{bot_name}-bot")
+        };
+
         Self {
-            name: format!("{bot_name}-bot"),
+            name,
             url: "https://unsigned.gg".to_string(),
             hook_attributes: HookAttributes {
                 url: "https://cortex.unsigned.gg/webhook".to_string(),
@@ -105,7 +115,7 @@ mod tests {
     #[test]
     fn test_manifest_for_conclave_bot() {
         let manifest = AppManifest::for_conclave_bot("sindri", "https://example.com/callback");
-        assert_eq!(manifest.name, "sindri-bot");
+        assert_eq!(manifest.name, "unsigned-sindri-bot");
         assert_eq!(manifest.redirect_url, "https://example.com/callback");
         assert_eq!(
             manifest
@@ -124,6 +134,6 @@ mod tests {
         assert!(!manifest.public);
 
         let json = manifest.to_json().expect("serialize manifest");
-        assert!(json.contains("\"name\":\"sindri-bot\""));
+        assert!(json.contains("\"name\":\"unsigned-sindri-bot\""));
     }
 }

@@ -22,12 +22,13 @@ pub const DELEGATED_SOVEREIGN_ROOT_EMAIL: &str = "ahackley@cerebral.work";
 pub const DELEGATED_SOVEREIGN_ROOT_GITHUB: &str = "lordvoid";
 
 /// Every Sovereign Root email: the Primary, the Delegated, and the co-founder roots
-/// Patrick Gray and Mark Masterson (operator ruling 2026-10-26).
+/// Patrick Gray, Mark Masterson and Darius Faroughy (operator rulings 2026-10-26).
 pub const SOVEREIGN_ROOT_EMAILS: &[&str] = &[
     SOLE_SUPERADMIN_EMAIL,
     DELEGATED_SOVEREIGN_ROOT_EMAIL,
     "pgray@cerebral.work",
     "mmasterson@cerebral.work",
+    "dfaroughy@cerebral.work",
 ];
 
 /// Every Sovereign Root GitHub login, lowercase, in the same order as [`SOVEREIGN_ROOT_EMAILS`].
@@ -36,6 +37,7 @@ pub const SOVEREIGN_ROOT_GITHUBS: &[&str] = &[
     DELEGATED_SOVEREIGN_ROOT_GITHUB,
     "pgray",
     "madmax983",
+    "dfaroughy",
 ];
 
 /// Returns true if `email` is one of [`SOVEREIGN_ROOT_EMAILS`].
@@ -296,13 +298,17 @@ mod tests {
 
         // Co-founder Sovereign Roots (operator ruling 2026-10-26), and a negative control:
         // a live Super Admin outside the root set must stay outside it.
-        for root in ["pgray@cerebral.work", "mmasterson@cerebral.work"] {
+        for root in [
+            "pgray@cerebral.work",
+            "mmasterson@cerebral.work",
+            "dfaroughy@cerebral.work",
+        ] {
             assert!(
                 is_sovereign_root_email(root),
                 "{root} must be a sovereign root"
             );
         }
-        for login in ["pgray", "madmax983", "MadMax983"] {
+        for login in ["pgray", "madmax983", "MadMax983", "dfaroughy"] {
             assert!(
                 is_sovereign_root_github(login),
                 "{login} must be a sovereign root login"

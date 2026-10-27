@@ -68,8 +68,8 @@ pub use presence::{
 pub use principal::{
     CapabilityEnvelope, DELEGATED_SOVEREIGN_ROOT_EMAIL, DELEGATED_SOVEREIGN_ROOT_GITHUB,
     GroupDecision, PROHIBITED_SENSITIVE_PATHS, Principal, SOLE_SUPERADMIN_EMAIL,
-    SOLE_SUPERADMIN_GITHUB, SubjectMatterMesh, is_sovereign_root_email, is_sovereign_root_github,
-    reconcile_group_decisions,
+    SOLE_SUPERADMIN_GITHUB, SOVEREIGN_ROOT_EMAILS, SOVEREIGN_ROOT_GITHUBS, SubjectMatterMesh,
+    is_sovereign_root_email, is_sovereign_root_github, reconcile_group_decisions,
 };
 pub use reconcile::{
     LiveDirectoryState, LiveGroup, LiveUser, ReconcilePlan, apply_refusal, held_members,

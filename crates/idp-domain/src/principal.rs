@@ -21,20 +21,37 @@ pub const DELEGATED_SOVEREIGN_ROOT_EMAIL: &str = "ahackley@cerebral.work";
 /// Delegated Sovereign Root co-custodian GitHub login (lowercase for case-insensitive matching).
 pub const DELEGATED_SOVEREIGN_ROOT_GITHUB: &str = "lordvoid";
 
-/// Returns true if `email` is either the Primary Sovereign Root (`ctodie@cerebral.work`)
-/// or the Delegated Sovereign Root (`ahackley@cerebral.work`).
+/// Every Sovereign Root email: the Primary, the Delegated, and the co-founder roots
+/// Patrick Gray and Mark Masterson (operator ruling 2026-10-26).
+pub const SOVEREIGN_ROOT_EMAILS: &[&str] = &[
+    SOLE_SUPERADMIN_EMAIL,
+    DELEGATED_SOVEREIGN_ROOT_EMAIL,
+    "pgray@cerebral.work",
+    "mmasterson@cerebral.work",
+];
+
+/// Every Sovereign Root GitHub login, lowercase, in the same order as [`SOVEREIGN_ROOT_EMAILS`].
+pub const SOVEREIGN_ROOT_GITHUBS: &[&str] = &[
+    SOLE_SUPERADMIN_GITHUB,
+    DELEGATED_SOVEREIGN_ROOT_GITHUB,
+    "pgray",
+    "madmax983",
+];
+
+/// Returns true if `email` is one of [`SOVEREIGN_ROOT_EMAILS`].
 pub fn is_sovereign_root_email(email: &str) -> bool {
     let trimmed = email.trim();
-    trimmed.eq_ignore_ascii_case(SOLE_SUPERADMIN_EMAIL)
-        || trimmed.eq_ignore_ascii_case(DELEGATED_SOVEREIGN_ROOT_EMAIL)
+    SOVEREIGN_ROOT_EMAILS
+        .iter()
+        .any(|root| trimmed.eq_ignore_ascii_case(root))
 }
 
-/// Returns true if `login` is either the Primary Sovereign Root (`todie`)
-/// or the Delegated Sovereign Root (`lordvoid`).
+/// Returns true if `login` is one of [`SOVEREIGN_ROOT_GITHUBS`].
 pub fn is_sovereign_root_github(login: &str) -> bool {
     let trimmed = login.trim();
-    trimmed.eq_ignore_ascii_case(SOLE_SUPERADMIN_GITHUB)
-        || trimmed.eq_ignore_ascii_case(DELEGATED_SOVEREIGN_ROOT_GITHUB)
+    SOVEREIGN_ROOT_GITHUBS
+        .iter()
+        .any(|root| trimmed.eq_ignore_ascii_case(root))
 }
 
 /// Paths in `cerebral-work/identity` that Clockwork Elves are never permitted to modify.
@@ -276,6 +293,28 @@ mod tests {
             Principal::for_human("intruder@cerebral.work", false, true, scopes.clone()),
             Principal::Denied
         );
+
+        // Co-founder Sovereign Roots (operator ruling 2026-10-26), and a negative control:
+        // a live Super Admin outside the root set must stay outside it.
+        for root in ["pgray@cerebral.work", "mmasterson@cerebral.work"] {
+            assert!(
+                is_sovereign_root_email(root),
+                "{root} must be a sovereign root"
+            );
+        }
+        for login in ["pgray", "madmax983", "MadMax983"] {
+            assert!(
+                is_sovereign_root_github(login),
+                "{login} must be a sovereign root login"
+            );
+        }
+        for outsider in ["rvita@cerebral.work", "intruder@cerebral.work"] {
+            assert!(
+                !is_sovereign_root_email(outsider),
+                "{outsider} must not be a sovereign root"
+            );
+        }
+        assert!(!is_sovereign_root_github("rvita-byte"));
         assert_eq!(
             Principal::for_admin_tier(
                 "ahackley@cerebral.work",

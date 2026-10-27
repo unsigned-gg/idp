@@ -10,7 +10,7 @@ use crate::error::IdpError;
 use crate::planes::{all_declared, disjoint_planes_check, unmanaged_declared};
 use crate::principal::{
     DELEGATED_SOVEREIGN_ROOT_EMAIL, DELEGATED_SOVEREIGN_ROOT_GITHUB, SOLE_SUPERADMIN_EMAIL,
-    SOLE_SUPERADMIN_GITHUB, is_sovereign_root_email,
+    SOLE_SUPERADMIN_GITHUB, SOVEREIGN_ROOT_EMAILS, is_sovereign_root_email,
 };
 use crate::registry::is_automation_login;
 use chrono::NaiveDate;
@@ -350,8 +350,8 @@ pub fn missing_matrix_groups(repo: &Path) -> Result<BTreeSet<String>, IdpError> 
 /// - Unique emails and unique `github_handle`s in `directory/users.yaml`
 /// - Every user's `org_unit` exists in `directory/orgunits.yaml` (or `"/"`)
 /// - `admin` (if set) is in `{"super", "delegated", "delegated-sovereign"}`
-/// - `super` / `is_super_admin` is restricted to `ctodie@cerebral.work` and `delegated-sovereign` to `ahackley@cerebral.work`
-/// - Sovereign roots (`ctodie@cerebral.work`, `ahackley@cerebral.work`) are never `suspended: true` and reside in `/Humans/Admins` when declared
+/// - `super` / `is_super_admin` is restricted to [`SOVEREIGN_ROOT_EMAILS`] and `delegated-sovereign` to `ahackley@cerebral.work`
+/// - Sovereign roots ([`SOVEREIGN_ROOT_EMAILS`]) are never `suspended: true` and reside in `/Humans/Admins` when declared
 /// - Every `groups/<stem>.yaml` matches `email` prefix `<stem>@`
 /// - Every `unreconciled_members` entry has a non-empty `reason` and valid ISO `until` date
 /// - Every user in `directory/licenses.yaml` exists in `directory/users.yaml`
@@ -414,7 +414,8 @@ pub fn validate_directory_schema(repo: &Path) -> Result<usize, IdpError> {
         }
         if u.is_super_admin && !is_sovereign_root_email(email) {
             return Err(IdpError::Validation(format!(
-                "{email}: super admin is restricted exclusively to sovereign roots ({SOLE_SUPERADMIN_EMAIL} and {DELEGATED_SOVEREIGN_ROOT_EMAIL})"
+                "{email}: super admin is restricted exclusively to sovereign roots ({})",
+                SOVEREIGN_ROOT_EMAILS.join(", ")
             )));
         }
         if u.admin.as_deref() == Some("delegated-sovereign")
@@ -531,7 +532,7 @@ pub fn validate_directory_schema(repo: &Path) -> Result<usize, IdpError> {
 }
 
 /// Validates `roles.yaml`, `bundles.yaml`, `policies.yaml`, and optional `role-matrix.yaml` invariants,
-/// including the sovereign root rules (`ctodie@cerebral.work` / `todie` and `ahackley@cerebral.work` / `LordVoid`)
+/// including the sovereign root rules ([`SOVEREIGN_ROOT_EMAILS`] / [`SOVEREIGN_ROOT_GITHUBS`])
 /// and Clockwork Elf automation constraints.
 pub fn validate_identity_models(repo: &Path) -> Result<(), IdpError> {
     let dir = repo.join("directory");
@@ -720,7 +721,8 @@ pub fn validate_identity_models(repo: &Path) -> Result<(), IdpError> {
                 let email = entry.get("email").and_then(|v| v.as_str()).unwrap_or("");
                 if !is_sovereign_root_email(email) {
                     return Err(IdpError::Validation(format!(
-                        "{doc_name} break_glass_principals entry must be a sovereign root ({SOLE_SUPERADMIN_EMAIL} or {DELEGATED_SOVEREIGN_ROOT_EMAIL}), found {email}"
+                        "{doc_name} break_glass_principals entry must be a sovereign root ({}), found {email}",
+                        SOVEREIGN_ROOT_EMAILS.join(", ")
                     )));
                 }
             }

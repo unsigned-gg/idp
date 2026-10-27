@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `dfaroughy@cerebral.work` (`dfaroughy`) joins the Sovereign Root set, by operator ruling 2026-10-26.
 - `SOVEREIGN_ROOT_EMAILS` and `SOVEREIGN_ROOT_GITHUBS` in `idp-domain::principal`: the Sovereign Root set now holds `ctodie`, `ahackley`, and the co-founders `pgray` and `mmasterson` (`madmax983`), by operator ruling 2026-10-26. `is_sovereign_root_email` and `is_sovereign_root_github` read the set. The existing single-root constants stay exported.
 - Extracted pure Wave-0 domain leaf crate `idp-domain` (`principal`, `security`, `manifest`) enforcing zero runtime I/O (`cargo xtask zero-io-domain`).
 - Extracted multi-plane identity primitives into `idp`:

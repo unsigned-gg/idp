@@ -1026,10 +1026,10 @@ impl IntrospectedOAuth2Token {
     /// # Lattice Rules
     /// 1. Inactive tokens (`!active`), expired tokens (`exp <= now_epoch`), or not-yet-valid tokens
     ///    (`nbf > now_epoch`) evaluate to [`Principal::Denied`].
-    /// 2. Any token carrying the `"estate:superuser"` scope whose `sub` is NOT
-    ///    [`SOLE_SUPERADMIN_EMAIL`] (`ctodie@cerebral.work`) is rejected as [`Principal::Denied`]
+    /// 2. Any token carrying the `"estate:superuser"` scope whose `sub` is NOT a Sovereign Root
+    ///    ([`crate::principal::SOVEREIGN_ROOT_EMAILS`]) is rejected as [`Principal::Denied`]
     ///    (Sovereign Root invariant).
-    /// 3. When `sub` equals [`SOLE_SUPERADMIN_EMAIL`] and scopes contain `"estate:superuser"`,
+    /// 3. When `sub` is a Sovereign Root and scopes contain `"estate:superuser"`,
     ///    evaluates to [`Principal::Superuser`].
     /// 4. Active tokens with zero scopes evaluate to [`Principal::Unscoped`]; active tokens with
     ///    non-empty scopes evaluate to [`Principal::Scoped`].

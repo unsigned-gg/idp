@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Migrate Rust CI build caching in `.github/workflows/ci.yml` from `Swatinem/rust-cache` to `kunobi-ninja/kache-action`.
+
 ### Added
 
 - `dfaroughy@cerebral.work` (`dfaroughy`) joins the Sovereign Root set, by operator ruling 2026-10-26.

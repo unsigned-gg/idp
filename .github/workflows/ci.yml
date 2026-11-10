@@ -12,7 +12,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_INCREMENTAL: 0
+  CARGO_INCREMENTAL: "0"
   CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
   RUST_BACKTRACE: 1
 
@@ -29,6 +29,15 @@ jobs:
         with:
           toolchain: "1.94.1"
           components: rustfmt, clippy
+
+      - name: Rust build cache (kache)
+        uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v2.0.0
+        with:
+          version: "2.0.0"
+          cache-executables: "false"
+          github-cache: "true"
+          manifest-key: ci-check
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run xwork CI DAG
         run: cargo xwork
@@ -53,11 +62,13 @@ jobs:
         run: |
           rustup toolchain install
           rustc --version
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Rust build cache (kache)
+        uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v2.0.0
         with:
-          shared-key: xtask-ci
-          # The pinned tools `cargo xtask tools` builds into .tools/.
-          cache-directories: .tools
-          cache-on-failure: true
+          version: "2.0.0"
+          cache-executables: "false"
+          github-cache: "true"
+          manifest-key: xtask-ci
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo xtask ci
         run: cargo xtask ci
